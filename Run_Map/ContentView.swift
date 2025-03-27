@@ -10,15 +10,25 @@ import MapKit
 import CoreLocation
 import HealthKit
 
-// New LocationManager that requests authorization.
+// LocationManager now publishes the current location.
 class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
     private let locationManager = CLLocationManager()
+    @Published var currentLocation: CLLocation? = nil
     
     override init() {
         super.init()
         locationManager.delegate = self
-        // Request authorization.
+        locationManager.desiredAccuracy = kCLLocationAccuracyBest
         locationManager.requestWhenInUseAuthorization()
+        locationManager.startUpdatingLocation()
+    }
+    
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        if let location = locations.last {
+            DispatchQueue.main.async {
+                self.currentLocation = location
+            }
+        }
     }
 }
 
@@ -56,7 +66,7 @@ class RoutePolyline: MKPolyline {
 
 struct ContentView: View {
     @StateObject private var viewModel = RunViewModel()
-    @StateObject private var locationManager = LocationManager() // <-- Instantiate LocationManager.
+    @StateObject private var locationManager = LocationManager() // Location manager instance.
     
     @State private var region = MKCoordinateRegion(
         center: CLLocationCoordinate2D(latitude: 52.52, longitude: 13.405),
@@ -71,7 +81,7 @@ struct ContentView: View {
     
     var body: some View {
         ZStack {
-            // Map view that ignores safe areas.
+            // Map view.
             RouteMapView(routes: viewModel.routes, region: region, recentDays: Int(recentDays))
                 .ignoresSafeArea()
             
@@ -85,12 +95,11 @@ struct ContentView: View {
                     .cornerRadius(8)
             }
             
-            // Conditional slider button / panel at the bottom left.
+            // Conditional slider panel (bottom left).
             VStack {
                 Spacer()
                 HStack {
                     if sliderExpanded {
-                        // Expanded slider panel.
                         VStack(alignment: .leading) {
                             HStack {
                                 Text("Highlight workouts from last \(Int(recentDays)) day\(Int(recentDays) == 1 ? "" : "s")")
@@ -112,7 +121,6 @@ struct ContentView: View {
                         .cornerRadius(10)
                         .transition(.move(edge: .bottom))
                     } else {
-                        // Collapsed state: show an icon.
                         Button(action: {
                             withAnimation {
                                 sliderExpanded = true
@@ -129,19 +137,40 @@ struct ContentView: View {
                 }
                 .padding()
             }
+            
+            // "Current Location" button (bottom right).
+            VStack {
+                Spacer()
+                HStack {
+                    Spacer()
+                    Button(action: {
+                        if let currentLocation = locationManager.currentLocation {
+                            // Update region to center on current location.
+                            region = MKCoordinateRegion(
+                                center: currentLocation.coordinate,
+                                span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
+                            )
+                        }
+                    }) {
+                        Image(systemName: "location.fill")
+                            .padding()
+                            .background(Color.white.opacity(0.8))
+                            .clipShape(Circle())
+                    }
+                    .padding()
+                }
+            }
         }
         .onAppear {
             viewModel.healthManager.requestAuthorization()
-            // Load routes after a short delay.
+            // Load routes.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
                 viewModel.loadRuns()
-                // Hide loading overlay after routes are loaded.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
                     isLoading = false
                 }
             }
         }
-        // Briefly show the loading overlay when slider value changes.
         .onChange(of: recentDays) { _ in
             isLoading = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
@@ -158,7 +187,6 @@ struct RouteMapView: UIViewRepresentable {
     
     func makeUIView(context: Context) -> MKMapView {
         let mapView = MKMapView()
-        // Set the initial region only once.
         mapView.region = region
         // Enable showing the user's current location.
         mapView.showsUserLocation = true
@@ -166,6 +194,9 @@ struct RouteMapView: UIViewRepresentable {
     }
     
     func updateUIView(_ mapView: MKMapView, context: Context) {
+        // Set the region whenever it changes (e.g., when the user taps the current location button).
+        mapView.setRegion(region, animated: true)
+        
         // Remove existing overlays.
         mapView.removeOverlays(mapView.overlays)
         // Add a custom polyline for each route.
@@ -174,7 +205,6 @@ struct RouteMapView: UIViewRepresentable {
             polyline.routeDate = route.date
             mapView.addOverlay(polyline)
         }
-        // Keep the current map position.
         mapView.delegate = context.coordinator
         context.coordinator.recentDays = recentDays
     }
@@ -184,7 +214,6 @@ struct RouteMapView: UIViewRepresentable {
     }
     
     class Coordinator: NSObject, MKMapViewDelegate {
-        // This value is updated in updateUIView.
         var recentDays: Int = 0
         
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
@@ -192,13 +221,8 @@ struct RouteMapView: UIViewRepresentable {
                 return MKOverlayRenderer(overlay: overlay)
             }
             let renderer = MKPolylineRenderer(polyline: routePolyline)
-            // Compute cutoff date based on recentDays.
             let cutoffDate = Date().addingTimeInterval(-Double(recentDays) * 24 * 3600)
-            if let routeDate = routePolyline.routeDate, routeDate >= cutoffDate {
-                renderer.strokeColor = .red
-            } else {
-                renderer.strokeColor = .systemBlue
-            }
+            renderer.strokeColor = (routePolyline.routeDate ?? Date()) >= cutoffDate ? .red : .systemBlue
             renderer.lineWidth = 3
             return renderer
         }
