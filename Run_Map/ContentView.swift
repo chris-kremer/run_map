@@ -1,19 +1,13 @@
-//
-//  ContentView.swift
-//  Run_Map
-//
-//  Created by Christian Kremer on 24.03.25.
-//
-
 import SwiftUI
 import MapKit
 import CoreLocation
 import HealthKit
 
-// LocationManager now publishes the current location.
+// MARK: - Location Manager
+
 class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
     private let locationManager = CLLocationManager()
-    @Published var currentLocation: CLLocation? = nil
+    @Published var currentLocation: CLLocation?
     
     override init() {
         super.init()
@@ -32,181 +26,244 @@ class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
     }
 }
 
-// Updated Route model now includes the workout date.
+// MARK: - Route Model
+
 struct Route: Identifiable {
     let id = UUID()
     let coordinates: [CLLocationCoordinate2D]
     let date: Date
+    let workoutType: HKWorkoutActivityType
 }
+
+// MARK: - ViewModel
 
 class RunViewModel: ObservableObject {
     @Published var routes: [Route] = []
-    
     let healthManager = HealthManager()
     
     func loadRuns() {
-        // Fetch running & walking workouts and add the start date.
         healthManager.fetchRunningWorkouts { workouts in
             for workout in workouts {
                 self.healthManager.fetchRoute(for: workout) { locations in
                     let coordinates = locations.map { $0.coordinate }
+                    let segments = self.filterRoute(coordinates)
                     DispatchQueue.main.async {
-                        self.routes.append(Route(coordinates: coordinates, date: workout.startDate))
+                        for segment in segments {
+                            self.routes.append(Route(coordinates: segment,
+                                                     date: workout.startDate,
+                                                     workoutType: workout.workoutActivityType))
+                        }
                     }
                 }
             }
         }
     }
+    
+    func loadNewRuns() {
+        guard let latest = routes.map(\.date).max() else {
+            loadRuns()
+            return
+        }
+        
+        healthManager.fetchRunningWorkouts { workouts in
+            let newWorkouts = workouts.filter { $0.startDate > latest }
+            for workout in newWorkouts {
+                self.healthManager.fetchRoute(for: workout) { locations in
+                    let coordinates = locations.map { $0.coordinate }
+                    let segments = self.filterRoute(coordinates)
+                    DispatchQueue.main.async {
+                        for segment in segments {
+                            self.routes.append(Route(coordinates: segment,
+                                                     date: workout.startDate,
+                                                     workoutType: workout.workoutActivityType))
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    func filterRoute(_ coordinates: [CLLocationCoordinate2D], maxDistance: CLLocationDistance = 20) -> [[CLLocationCoordinate2D]] {
+        guard coordinates.count > 1 else { return [coordinates] }
+        var segments: [[CLLocationCoordinate2D]] = []
+        var currentSegment = [coordinates[0]]
+        
+        for i in 1..<coordinates.count {
+            let prev = CLLocation(latitude: coordinates[i - 1].latitude,
+                                  longitude: coordinates[i - 1].longitude)
+            let curr = CLLocation(latitude: coordinates[i].latitude,
+                                  longitude: coordinates[i].longitude)
+            if prev.distance(from: curr) <= maxDistance {
+                currentSegment.append(coordinates[i])
+            } else {
+                if currentSegment.count > 1 {
+                    segments.append(currentSegment)
+                }
+                currentSegment = [coordinates[i]]
+            }
+        }
+        if currentSegment.count > 1 {
+            segments.append(currentSegment)
+        }
+        return segments
+    }
 }
 
-// Custom polyline subclass that stores the workout date.
+// MARK: - RoutePolyline
+
 class RoutePolyline: MKPolyline {
+    var routeID: UUID?
     var routeDate: Date?
+    var workoutType: HKWorkoutActivityType?
+    var isHighlighted: Bool = false
 }
+
+// MARK: - Map Region Computation
+
+/// Computes an MKCoordinateRegion that fits all the given coordinates
+func coordinateRegion(for coordinates: [CLLocationCoordinate2D]) -> MKCoordinateRegion {
+    guard !coordinates.isEmpty else {
+        return MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: 52.52, longitude: 13.405),
+                                  span: MKCoordinateSpan(latitudeDelta: 0.1, longitudeDelta: 0.1))
+    }
+    
+    let latitudes = coordinates.map { $0.latitude }
+    let longitudes = coordinates.map { $0.longitude }
+    
+    let minLat = latitudes.min()!
+    let maxLat = latitudes.max()!
+    let minLon = longitudes.min()!
+    let maxLon = longitudes.max()!
+    
+    let center = CLLocationCoordinate2D(latitude: (minLat + maxLat) / 2,
+                                        longitude: (minLon + maxLon) / 2)
+    let span = MKCoordinateSpan(latitudeDelta: (maxLat - minLat) * 1.3,
+                                longitudeDelta: (maxLon - minLon) * 1.3)
+    
+    return MKCoordinateRegion(center: center, span: span)
+}
+
+// MARK: - ContentView
 
 struct ContentView: View {
     @StateObject private var viewModel = RunViewModel()
-    @StateObject private var locationManager = LocationManager() // Location manager instance.
+    @StateObject private var locationManager = LocationManager()
     
     @State private var region = MKCoordinateRegion(
         center: CLLocationCoordinate2D(latitude: 52.52, longitude: 13.405),
         span: MKCoordinateSpan(latitudeDelta: 0.1, longitudeDelta: 0.1)
     )
-    // The slider value (in days). We'll use a range from 0 to 7 days.
-    @State private var recentDays: Double = 2
-    // Track whether to show the loading overlay.
-    @State private var isLoading: Bool = true
-    // Track whether the slider panel is expanded.
-    @State private var sliderExpanded: Bool = false
+    @State private var isLoading = true
+    @State private var highlightedRouteID: UUID?
     
     var body: some View {
         ZStack {
-            // Map view.
-            RouteMapView(routes: viewModel.routes, region: region, recentDays: Int(recentDays))
+            RouteMapView(routes: viewModel.routes, region: region, highlightedRouteID: highlightedRouteID)
                 .ignoresSafeArea()
             
-            // Loading overlay.
             if isLoading {
-                Text("Loading")
-                    .font(.largeTitle)
+                Text("Loading...")
                     .padding()
-                    .background(Color.black.opacity(0.5))
+                    .background(Color.black.opacity(0.6))
                     .foregroundColor(.white)
                     .cornerRadius(8)
             }
             
-            // Conditional slider panel (bottom left).
             VStack {
                 Spacer()
-                HStack {
-                    if sliderExpanded {
-                        VStack(alignment: .leading) {
-                            HStack {
-                                Text("Highlight workouts from last \(Int(recentDays)) day\(Int(recentDays) == 1 ? "" : "s")")
-                                    .font(.headline)
-                                Spacer()
-                                Button(action: {
-                                    withAnimation {
-                                        sliderExpanded = false
-                                    }
-                                }) {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .font(.title)
-                                }
-                            }
-                            Slider(value: $recentDays, in: 0...7, step: 1)
+                VStack(spacing: 12) {
+                    // Find Last Workout Button: highlights the last route and centers map on the entire route.
+                    Button {
+                        if let latest = viewModel.routes.sorted(by: { $0.date > $1.date }).first {
+                            highlightedRouteID = latest.id
+                            // Center the map on the entire route.
+                            let routeRegion = coordinateRegion(for: latest.coordinates)
+                            region = routeRegion
                         }
-                        .padding()
-                        .background(Color.white.opacity(0.8))
-                        .cornerRadius(10)
-                        .transition(.move(edge: .bottom))
-                    } else {
-                        Button(action: {
-                            withAnimation {
-                                sliderExpanded = true
-                            }
-                        }) {
-                            Image(systemName: "slider.horizontal.3")
-                                .padding()
-                                .background(Color.white.opacity(0.8))
-                                .clipShape(Circle())
-                        }
-                        .transition(.move(edge: .bottom))
+                    } label: {
+                        Image(systemName: "flame.fill")
+                            .padding()
+                            .background(Color.white.opacity(0.9))
+                            .clipShape(Circle())
                     }
-                    Spacer()
-                }
-                .padding()
-            }
-            
-            // "Current Location" button (bottom right).
-            VStack {
-                Spacer()
-                HStack {
-                    Spacer()
-                    Button(action: {
-                        if let currentLocation = locationManager.currentLocation {
-                            // Update region to center on current location.
+                    
+                    // Update Button
+                    Button {
+                        isLoading = true
+                        viewModel.loadNewRuns()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                            isLoading = false
+                        }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .padding()
+                            .background(Color.white.opacity(0.9))
+                            .clipShape(Circle())
+                    }
+                    
+                    // Location Button
+                    Button {
+                        if let loc = locationManager.currentLocation {
                             region = MKCoordinateRegion(
-                                center: currentLocation.coordinate,
+                                center: loc.coordinate,
                                 span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
                             )
                         }
-                    }) {
+                    } label: {
                         Image(systemName: "location.fill")
                             .padding()
-                            .background(Color.white.opacity(0.8))
+                            .background(Color.white.opacity(0.9))
                             .clipShape(Circle())
                     }
-                    .padding()
                 }
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .trailing)
             }
         }
         .onAppear {
             viewModel.healthManager.requestAuthorization()
-            // Load routes.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
                 viewModel.loadRuns()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                    if let latest = viewModel.routes.sorted(by: { $0.date > $1.date }).first {
+                        highlightedRouteID = latest.id
+                        region = coordinateRegion(for: latest.coordinates)
+                    }
                     isLoading = false
                 }
-            }
-        }
-        .onChange(of: recentDays) { _ in
-            isLoading = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                isLoading = false
             }
         }
     }
 }
 
+// MARK: - RouteMapView
+
 struct RouteMapView: UIViewRepresentable {
     var routes: [Route]
     var region: MKCoordinateRegion
-    var recentDays: Int
+    var highlightedRouteID: UUID?
     
     func makeUIView(context: Context) -> MKMapView {
         let mapView = MKMapView()
         mapView.region = region
-        // Enable showing the user's current location.
         mapView.showsUserLocation = true
+        mapView.delegate = context.coordinator
         return mapView
     }
     
     func updateUIView(_ mapView: MKMapView, context: Context) {
-        // Set the region whenever it changes (e.g., when the user taps the current location button).
         mapView.setRegion(region, animated: true)
-        
-        // Remove existing overlays.
         mapView.removeOverlays(mapView.overlays)
-        // Add a custom polyline for each route.
+        
         for route in routes {
             let polyline = RoutePolyline(coordinates: route.coordinates, count: route.coordinates.count)
+            polyline.routeID = route.id
             polyline.routeDate = route.date
+            polyline.workoutType = route.workoutType
+            // Mark this polyline as highlighted if its ID matches.
+            polyline.isHighlighted = (route.id == highlightedRouteID)
             mapView.addOverlay(polyline)
         }
-        mapView.delegate = context.coordinator
-        context.coordinator.recentDays = recentDays
     }
     
     func makeCoordinator() -> Coordinator {
@@ -214,15 +271,25 @@ struct RouteMapView: UIViewRepresentable {
     }
     
     class Coordinator: NSObject, MKMapViewDelegate {
-        var recentDays: Int = 0
-        
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
-            guard let routePolyline = overlay as? RoutePolyline else {
+            guard let polyline = overlay as? RoutePolyline else {
                 return MKOverlayRenderer(overlay: overlay)
             }
-            let renderer = MKPolylineRenderer(polyline: routePolyline)
-            let cutoffDate = Date().addingTimeInterval(-Double(recentDays) * 24 * 3600)
-            renderer.strokeColor = (routePolyline.routeDate ?? Date()) >= cutoffDate ? .red : .systemBlue
+            
+            let renderer = MKPolylineRenderer(polyline: polyline)
+            // If this polyline is marked as highlighted, render it in orange.
+            if polyline.isHighlighted {
+                renderer.strokeColor = .orange
+            } else {
+                switch polyline.workoutType {
+                case .running:
+                    renderer.strokeColor = .systemRed
+                case .walking:
+                    renderer.strokeColor = .systemBlue
+                default:
+                    renderer.strokeColor = .systemGreen
+                }
+            }
             renderer.lineWidth = 3
             return renderer
         }
