@@ -254,6 +254,14 @@ struct ContentView: View {
     @State private var trackingTimer: Timer?
     @State private var showControls = false
 
+    // Stats banner state
+    @AppStorage("lastRunCount") private var lastRunCount = 0
+    @AppStorage("lastDistanceKm") private var lastDistanceKm: Double = 0
+    @AppStorage("hasLaunchedBefore") private var hasLaunchedBefore = false
+    @State private var summaryMessage: String?
+    @State private var showSummaryAlert = false
+    @State private var hasShownSummary = false
+
     private func circleButton(icon: String, bg: Color = .blue) -> some View {
         Image(systemName: icon)
             .foregroundColor(.white)
@@ -392,6 +400,20 @@ struct ContentView: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     isLoading = false
                 }
+                if !hasShownSummary {
+                    let newRuns = viewModel.routes.count - lastRunCount
+                    let newDistance = viewModel.totalDistanceKm - lastDistanceKm
+                    if hasLaunchedBefore && (newRuns > 0 || newDistance > 0) {
+                        summaryMessage = "You added \(newRuns) runs for " +
+                            String(format: "%.1f", newDistance) +
+                            " km since your last visit. Great job!"
+                        showSummaryAlert = true
+                    }
+                    lastRunCount = viewModel.routes.count
+                    lastDistanceKm = viewModel.totalDistanceKm
+                    hasShownSummary = true
+                    hasLaunchedBefore = true
+                }
             } else {
                 isLoading = true
             }
@@ -409,6 +431,9 @@ struct ContentView: View {
                 loadDemoWorkouts()
                 showNoWorkouts = false
             }
+        }
+        .alert(summaryMessage ?? "", isPresented: $showSummaryAlert) {
+            Button("OK", role: .cancel) { }
         }
     }   // ← closes the `var body: some View` property
 
