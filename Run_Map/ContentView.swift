@@ -222,6 +222,12 @@ struct ContentView: View {
     @StateObject private var locationManager = LocationManager()
 
     @AppStorage("hasSeenTutorial") private var hasSeenTutorial = false
+    @AppStorage("mapType") private var mapTypeRawValue: UInt = MKMapType.standard.rawValue
+
+    private var mapType: MKMapType {
+        get { MKMapType(rawValue: mapTypeRawValue) ?? .standard }
+        set { mapTypeRawValue = newValue.rawValue }
+    }
 
     @State private var region = MKCoordinateRegion(
         center: CLLocationCoordinate2D(latitude: 52.52, longitude: 13.405),
@@ -253,7 +259,8 @@ struct ContentView: View {
                          region: region,
                          highlightedRouteID: highlightedRouteID,
                          showUserLocation: showUserLocation,
-                         liveCoordinates: liveCoordinates)
+                         liveCoordinates: liveCoordinates,
+                         mapType: mapType)
                 .ignoresSafeArea()
             
             VStack {
@@ -336,6 +343,10 @@ struct ContentView: View {
                                 }
                             }
                             .onLongPressGesture { showUserLocation = false }
+
+                        // Map style toggle button
+                        circleButton(icon: mapType == .standard ? "globe" : "map")
+                            .onTapGesture { toggleMapType() }
                     }
 
                     // Main FAB that toggles the stack
@@ -431,6 +442,10 @@ struct ContentView: View {
             }
         }
     }
+
+    private func toggleMapType() {
+        mapType = (mapType == .standard) ? .satellite : .standard
+    }
 }
 
 // MARK: - RouteMapView
@@ -441,15 +456,17 @@ struct RouteMapView: UIViewRepresentable {
     var highlightedRouteID: UUID?
     var showUserLocation: Bool
     var liveCoordinates: [CLLocationCoordinate2D]
+    var mapType: MKMapType
     
     func makeUIView(context: Context) -> MKMapView {
         let mapView = MKMapView()
         mapView.region = region
         mapView.showsUserLocation = showUserLocation
+        mapView.mapType = mapType
         mapView.delegate = context.coordinator
         return mapView
     }
-    
+
     func updateUIView(_ mapView: MKMapView, context: Context) {
         // Skip automatic recentering while tracking
         if liveCoordinates.isEmpty {
@@ -463,6 +480,10 @@ struct RouteMapView: UIViewRepresentable {
 
         if mapView.showsUserLocation != showUserLocation {
             mapView.showsUserLocation = showUserLocation
+        }
+
+        if mapView.mapType != mapType {
+            mapView.mapType = mapType
         }
 
         // Remove existing live overlays (those without routeID)
