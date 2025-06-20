@@ -190,6 +190,15 @@ class RoutePolyline: MKPolyline {
     var isHighlighted: Bool = false
 }
 
+private extension RoutePolyline {
+    /// Convenience factory because `MKPolyline(coordinates:count:)`
+    /// is a *convenience* initializer that isn’t inherited by subclasses.
+    static func fromCoordinates(_ coords: [CLLocationCoordinate2D]) -> RoutePolyline {
+        // MKPolyline (and subclasses) expose an initializer that takes an *array* directly.
+        return RoutePolyline(coordinates: coords, count: coords.count)
+    }
+}
+
 // MARK: - Map Region Computation
 
 /// Computes an MKCoordinateRegion that fits all the given coordinates
@@ -222,11 +231,11 @@ struct ContentView: View {
     @StateObject private var locationManager = LocationManager()
 
     @AppStorage("hasSeenTutorial") private var hasSeenTutorial = false
-    @AppStorage("mapType") private var mapTypeRawValue: UInt = MKMapType.standard.rawValue
+    @AppStorage("mapType") private var mapTypeRawValue: Int = Int(MKMapType.standard.rawValue)
 
     private var mapType: MKMapType {
-        get { MKMapType(rawValue: mapTypeRawValue) ?? .standard }
-        set { mapTypeRawValue = newValue.rawValue }
+        get { MKMapType(rawValue: UInt(mapTypeRawValue)) ?? .standard }
+        set { mapTypeRawValue = Int(newValue.rawValue) }
     }
 
     @State private var region = MKCoordinateRegion(
@@ -346,7 +355,11 @@ struct ContentView: View {
 
                         // Map style toggle button
                         circleButton(icon: mapType == .standard ? "globe" : "map")
-                            .onTapGesture { toggleMapType() }
+                            .onTapGesture {
+                                mapTypeRawValue = Int(
+                                    (mapType == .standard ? MKMapType.satellite : MKMapType.standard).rawValue
+                                )
+                            }
                     }
 
                     // Main FAB that toggles the stack
@@ -443,9 +456,7 @@ struct ContentView: View {
         }
     }
 
-    private func toggleMapType() {
-        mapType = (mapType == .standard) ? .satellite : .standard
-    }
+
 }
 
 // MARK: - RouteMapView
@@ -497,8 +508,7 @@ struct RouteMapView: UIViewRepresentable {
             .forEach(mapView.removeAnnotation)
 
         if liveCoordinates.count > 1 {
-            let live = RoutePolyline(coordinates: liveCoordinates,
-                                     count: liveCoordinates.count)
+            let live = RoutePolyline.fromCoordinates(liveCoordinates)
             mapView.addOverlay(live)
 
             // Drop a pin at the start
@@ -524,7 +534,7 @@ struct RouteMapView: UIViewRepresentable {
         // Add missing
         var toAdd: [MKOverlay] = []
         for route in routes where !existingIDs.contains(route.id) {
-            let pl = RoutePolyline(coordinates: route.coordinates, count: route.coordinates.count)
+            let pl = RoutePolyline.fromCoordinates(route.coordinates)
             pl.routeID = route.id
             pl.routeDate = route.date
             pl.workoutType = route.workoutType
