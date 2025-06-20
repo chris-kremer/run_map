@@ -1,79 +1,100 @@
-import CoreLocation
+import Foundation
 import HealthKit
+import CoreLocation
 
-class HealthManager: ObservableObject {
-    private var healthStore = HKHealthStore()
+class HealthKitManager: ObservableObject {
+    private let healthStore = HKHealthStore()
     
-    func fetchRunningWorkouts(completion: @escaping ([HKWorkout]) -> Void) {
-        let workoutType = HKObjectType.workoutType()
+    @Published var workouts: [HKWorkout] = []
+    
+    func requestAuthorization(completion: @escaping (Bool) -> Void) {
+        guard HKHealthStore.isHealthDataAvailable() else {
+            completion(false)
+            return
+        }
         
-        // Create predicates for running and walking workouts
-        let runningPredicate = HKQuery.predicateForWorkouts(with: .running)
-        let walkingPredicate = HKQuery.predicateForWorkouts(with: .walking)
-        // Combine them with OR so that workouts matching either type are returned
-        let predicate = NSCompoundPredicate(orPredicateWithSubpredicates: [runningPredicate, walkingPredicate])
+        let readTypes: Set = [
+            HKObjectType.workoutType(),
+            HKSeriesType.workoutRoute()
+        ]
         
-        let sortDescriptor = NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false)
-
-        let query = HKSampleQuery(sampleType: workoutType,
-                                  predicate: predicate,
-                                  limit: 0,
-                                  sortDescriptors: [sortDescriptor]) { _, samples, error in
-            guard let workouts = samples as? [HKWorkout], error == nil else {
-                print("Error fetching workouts: \(String(describing: error))")
-                completion([])
+        healthStore.requestAuthorization(toShare: [], read: readTypes) { success, error in
+            if let error = error {
+                print("❌ Authorization failed: \(error.localizedDescription)")
+            }
+            DispatchQueue.main.async {
+                completion(success)
+            }
+        }
+    }
+    
+    func fetchWorkouts() {
+        let type = HKObjectType.workoutType()
+        let sort = NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false)
+        let query = HKSampleQuery(sampleType: type, predicate: nil, limit: 30, sortDescriptors: [sort]) { [weak self] _, samples, error in
+            if let error = error {
+                print("❌ Failed to fetch workouts: \(error.localizedDescription)")
                 return
             }
-            completion(workouts)
-            print("✅ Retrieved \(workouts.count) running/walking workouts")
+            guard let workouts = samples as? [HKWorkout] else { return }
+            DispatchQueue.main.async {
+                self?.workouts = workouts
+            }
         }
-
         healthStore.execute(query)
     }
     
     func fetchRoute(for workout: HKWorkout, completion: @escaping ([CLLocation]) -> Void) {
         let predicate = HKQuery.predicateForObjects(from: workout)
-        let routeType = HKSeriesType.workoutRoute()
-        
-        let routeQuery = HKSampleQuery(sampleType: routeType, predicate: predicate, limit: HKObjectQueryNoLimit, sortDescriptors: nil) { _, samples, error in
-            guard let routes = samples as? [HKWorkoutRoute], let route = routes.first else {
-                print("⚠️ No route found for workout on \(workout.startDate)")
+        let routeQuery = HKSampleQuery(sampleType: HKSeriesType.workoutRoute(), predicate: predicate, limit: HKObjectQueryNoLimit, sortDescriptors: nil) { [weak self] _, samples, error in
+            guard let route = samples?.first as? HKWorkoutRoute else {
                 completion([])
                 return
             }
-
-            var allLocations: [CLLocation] = []
-            
-            let routeDataQuery = HKWorkoutRouteQuery(route: route) { _, locations, done, error in
-                guard let locations = locations else {
-                    completion([])
-                    return
-                }
-                allLocations.append(contentsOf: locations)
-                
-                if done {
-                    completion(allLocations)
-                    print("✅ Retrieved \(allLocations.count) locations for workout: \(workout.startDate)")
-                }
-            }
-            self.healthStore.execute(routeDataQuery)
+            self?.loadRouteLocations(from: route, completion: completion)
         }
-
         healthStore.execute(routeQuery)
     }
     
-    func requestAuthorization() {
-        let readTypes: Set = [
-            HKObjectType.workoutType(),
-            HKSeriesType.workoutRoute()
-        ]
-
-        healthStore.requestAuthorization(toShare: [], read: readTypes) { success, error in
-            if success {
-                print("✅ HealthKit authorization granted")
-            } else {
-                print("❌ HealthKit authorization failed: \(error?.localizedDescription ?? "Unknown error")")
+    private func loadRouteLocations(from route: HKWorkoutRoute, completion: @escaping ([CLLocation]) -> Void) {
+        var allLocations: [CLLocation] = []
+        let routeQuery = HKWorkoutRouteQuery(route: route) { _, locationsOrNil, done, error in
+            if let locations = locationsOrNil {
+                allLocations.append(contentsOf: locations)
+            }
+            if done {
+                DispatchQueue.main.async {
+                    completion(allLocations)
+                }
             }
         }
+        healthStore.execute(routeQuery)
+    }
+    /// Fetch running and walking workouts from HealthKit.
+    func fetchRunningWorkouts(limit: Int = 100,
+                              completion: @escaping ([HKWorkout]) -> Void) {
+        let workoutType = HKObjectType.workoutType()
+        
+        // Predicates for running and walking
+        let running = HKQuery.predicateForWorkouts(with: .running)
+        let walking = HKQuery.predicateForWorkouts(with: .walking)
+        let predicate = NSCompoundPredicate(orPredicateWithSubpredicates: [running, walking])
+        
+        let sort = NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false)
+        
+        let query = HKSampleQuery(sampleType: workoutType,
+                                  predicate: predicate,
+                                  limit: HKObjectQueryNoLimit,
+                                  sortDescriptors: [sort]) { _, samples, error in
+            if let error = error {
+                print("❌ Failed to fetch running/walking workouts: \(error.localizedDescription)")
+                DispatchQueue.main.async { completion([]) }
+                return
+            }
+            let workouts = samples as? [HKWorkout] ?? []
+            DispatchQueue.main.async { completion(workouts) }
+        }
+        
+        healthStore.execute(query)
     }
 }
