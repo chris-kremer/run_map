@@ -253,6 +253,7 @@ struct ContentView: View {
     @State private var liveCoordinates: [CLLocationCoordinate2D] = []
     @State private var trackingTimer: Timer?
     @State private var showControls = false
+    @State private var showStats = false
 
     // Stats banner state
     @AppStorage("lastRunCount") private var lastRunCount = 0
@@ -368,6 +369,12 @@ struct ContentView: View {
                                     (mapType == .standard ? MKMapType.satellite : MKMapType.standard).rawValue
                                 )
                             }
+
+                        // Stats button
+                        circleButton(icon: "chart.bar")
+                            .onTapGesture {
+                                showStats = true
+                            }
                     }
 
                     // Main FAB that toggles the stack
@@ -431,6 +438,9 @@ struct ContentView: View {
                 loadDemoWorkouts()
                 showNoWorkouts = false
             }
+        }
+        .sheet(isPresented: $showStats) {
+            StatsView(routes: viewModel.displayedRoutes)
         }
         .alert(summaryMessage ?? "", isPresented: $showSummaryAlert) {
             Button("OK", role: .cancel) { }
