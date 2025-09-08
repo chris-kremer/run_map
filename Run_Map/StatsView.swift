@@ -102,11 +102,13 @@ struct StatsView: View {
     private func computeStats() {
         // Validate routes array first
         guard !routes.isEmpty else {
+            print("⚠️ Empty routes array")
             loading = false
             return
         }
+        let routesArray = routes
         
-        routeTotal = routes.count
+        routeTotal = routesArray.count
         processedRoutes = 0
         uniqueCoords = 0
         geocoded = 0
@@ -115,7 +117,7 @@ struct StatsView: View {
         loading = true
         
         // Safely calculate total km with error handling
-        totalKm = routes.compactMap { route in
+        totalKm = routesArray.compactMap { route in
             guard route.coordinates.count > 1 else {
                 print("⚠️ Found route with insufficient coordinates: \(route.id) (count: \(route.coordinates.count))")
                 return nil
@@ -137,17 +139,27 @@ struct StatsView: View {
         var cityCache: [String: String] = [:]
         
         // Safely load cache with error handling
-        if let rawCoordCache = UserDefaults.standard.object(forKey: "coordCountryCache") as? [String: String] {
-            coordCache = rawCoordCache
-        } else {
-            print("⚠️ Invalid or missing coordCountryCache, starting fresh")
+        do {
+            if let rawCoordCache = UserDefaults.standard.object(forKey: "coordCountryCache") {
+                if let validCache = rawCoordCache as? [String: String] {
+                    coordCache = validCache
+                } else {
+                    print("⚠️ Invalid coordCountryCache type: \(type(of: rawCoordCache)), clearing")
+                    UserDefaults.standard.removeObject(forKey: "coordCountryCache")
+                }
+            }
+            
+            if let rawCityCache = UserDefaults.standard.object(forKey: "coordCityCache") {
+                if let validCache = rawCityCache as? [String: String] {
+                    cityCache = validCache
+                } else {
+                    print("⚠️ Invalid coordCityCache type: \(type(of: rawCityCache)), clearing")
+                    UserDefaults.standard.removeObject(forKey: "coordCityCache")
+                }
+            }
+        } catch {
+            print("⚠️ Error loading caches: \(error), starting fresh")
             UserDefaults.standard.removeObject(forKey: "coordCountryCache")
-        }
-        
-        if let rawCityCache = UserDefaults.standard.object(forKey: "coordCityCache") as? [String: String] {
-            cityCache = rawCityCache
-        } else {
-            print("⚠️ Invalid or missing coordCityCache, starting fresh")
             UserDefaults.standard.removeObject(forKey: "coordCityCache")
         }
         
@@ -158,7 +170,7 @@ struct StatsView: View {
         // Process all routes using fast local geocoding
         serialQueue.async {
             let result = self.processAllRoutesWithLocalGeocoding(
-                routes: self.routes, 
+                routes: routesArray, 
                 coordCache: coordCache, 
                 cityCache: cityCache
             )
