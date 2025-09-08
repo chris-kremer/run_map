@@ -273,6 +273,7 @@ struct StatsView: View {
         
         // Sample points along the route (every ~1km or key points)
         let samplePoints = sampleRoutePoints(coordinates: route.coordinates, maxSamples: 10)
+        guard !samplePoints.isEmpty else { return [] }
         let segmentDistance = route.distanceKm / Double(samplePoints.count)
         
         for coordinate in samplePoints {
@@ -316,7 +317,7 @@ struct StatsView: View {
         guard coordinates.count > maxSamples else { return coordinates }
         
         var sampledPoints: [CLLocationCoordinate2D] = []
-        let interval = coordinates.count / maxSamples
+        let interval = max(1, coordinates.count / maxSamples) // Ensure interval is at least 1
         
         for i in stride(from: 0, to: coordinates.count, by: interval) {
             sampledPoints.append(coordinates[i])
