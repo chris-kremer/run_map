@@ -8,30 +8,18 @@ struct StatsView: View {
     @State private var countryTotals: [(String, Double)] = []
     @State private var cityTotals: [(String, Double)] = []
     @State private var loading = true
+    @State private var routeTotal = 0
+    @State private var processedRoutes = 0
+    @State private var uniqueCoords = 0
+    @State private var geocoded = 0
+    @State private var heuristicallyClassified = 0
+    @State private var showAllCountries = false
+    @State private var showAllCities = false
 
     var body: some View {
         NavigationView {
             ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("You ran \(Int(totalKm))km in total.")
-                        .font(.headline)
-                        .padding(.bottom, 8)
-                    if !countryTotals.isEmpty {
-                        Text("Your top countries were:").font(.subheadline)
-                        ForEach(Array(countryTotals.prefix(3).enumerated()), id: \.offset) { idx, entry in
-                            Text("\(idx + 1)) \(entry.element.0) \(Int(entry.element.1))km")
-                        }
-                        .padding(.bottom, 8)
-                    }
-                    if !cityTotals.isEmpty {
-                        Text("Your top cities were:").font(.subheadline)
-                        ForEach(Array(cityTotals.prefix(3).enumerated()), id: \.offset) { idx, entry in
-                            Text("\(idx + 1)) \(entry.element.0) \(Int(entry.element.1))km")
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding()
+                statsContent
             }
             .navigationTitle("Stats")
             .toolbar {
@@ -41,36 +29,439 @@ struct StatsView: View {
             }
         }
         .onAppear(perform: computeStats)
+        .onChange(of: routes.count) { _ in
+            computeStats()
+        }
+    }
+
+    private var statsContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if loading {
+                ProgressView("Loading stats…")
+                    .padding(.bottom, 8)
+
+                Text("Scanned \(processedRoutes)/\(routeTotal) routes • \(uniqueCoords) unique coords • \(geocoded) geocoded")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                
+                Text("Heuristically classified: \(heuristicallyClassified)")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+
+                if !countryTotals.isEmpty || !cityTotals.isEmpty {
+                    Text("Showing partial results…")
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                }
+            }
+            else if totalKm == 0 {
+                Text("Go explore!")
+                    .font(.headline)
+                    .padding(.bottom, 8)
+            } else {
+                Text("You ran \(Int(totalKm)) km in total.")
+                    .font(.headline)
+                    .padding(.bottom, 8)
+            }
+
+            if !loading && countryTotals.isEmpty && cityTotals.isEmpty {
+                Text("No location data found.")
+                    .font(.subheadline)
+                    .padding(.bottom, 8)
+            }
+            if !countryTotals.isEmpty {
+                Text("Your top countries were:").font(.subheadline)
+                ForEach(Array(countryTotals.enumerated()).filter { $0.element.1 > 0 && (showAllCountries || $0.offset < 3) }, id: \.offset) { idx, entry in
+                    Text("\(idx + 1)) \(entry.0) \(Int(entry.1))km")
+                }
+                if countryTotals.count > 3 {
+                    Button(showAllCountries ? "Show less" : "Show all") {
+                        showAllCountries.toggle()
+                    }
+                    .font(.caption)
+                    .padding(.bottom, 8)
+                }
+            }
+            if !cityTotals.isEmpty {
+                Text("Your top cities were:").font(.subheadline)
+                ForEach(Array(cityTotals.enumerated()).filter { $0.element.1 > 0 && (showAllCities || $0.offset < 3) }, id: \.offset) { idx, entry in
+                    Text("\(idx + 1)) \(entry.0) \(Int(entry.1))km")
+                }
+                if cityTotals.count > 3 {
+                    Button(showAllCities ? "Show less" : "Show all") {
+                        showAllCities.toggle()
+                    }
+                    .font(.caption)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
     }
 
     private func computeStats() {
-        totalKm = routes.map(\.distanceKm).reduce(0, +)
-        let geocoder = CLGeocoder()
-        var countryDict: [String: Double] = [:]
-        var cityDict: [String: Double] = [:]
-        let group = DispatchGroup()
+        routeTotal = routes.count
+        processedRoutes = 0
+        uniqueCoords = 0
+        geocoded = 0
+        heuristicallyClassified = 0
 
-        for route in routes {
-            guard let first = route.coordinates.first else { continue }
-            group.enter()
-            let location = CLLocation(latitude: first.latitude, longitude: first.longitude)
-            geocoder.reverseGeocodeLocation(location) { placemarks, _ in
-                if let placemark = placemarks?.first {
-                    if let country = placemark.country {
-                        countryDict[country, default: 0] += route.distanceKm
-                    }
-                    if let city = placemark.locality {
-                        cityDict[city, default: 0] += route.distanceKm
-                    }
+        loading = true
+        totalKm = routes.reduce(0) { $0 + $1.distanceKm }
+
+        // Use fast local geocoding with fallback to network geocoding
+        let serialQueue = DispatchQueue(label: "stats.processing", qos: .userInitiated)
+        
+        // Load existing caches and clean them up
+        var coordCache = UserDefaults.standard
+            .dictionary(forKey: "coordCountryCache") as? [String: String] ?? [:]
+        var cityCache = UserDefaults.standard
+            .dictionary(forKey: "coordCityCache") as? [String: String] ?? [:]
+        
+        // Clean up old cached data with inconsistent country names
+        coordCache = cleanupCountryCache(coordCache)
+        cityCache = cleanupCityCache(cityCache, coordCache: coordCache)
+        
+        // Process all routes using fast local geocoding
+        serialQueue.async {
+            let result = self.processAllRoutesWithLocalGeocoding(
+                routes: self.routes, 
+                coordCache: coordCache, 
+                cityCache: cityCache
+            )
+            
+            DispatchQueue.main.async {
+                // Save updated caches
+                UserDefaults.standard.set(result.coordCache, forKey: "coordCountryCache")
+                UserDefaults.standard.set(result.cityCache, forKey: "coordCityCache")
+                
+                var countryDict = result.countryDict
+                let knownKm = countryDict.values.reduce(0, +)
+                let unknownKm = self.totalKm - knownKm
+                if unknownKm > 0 {
+                    countryDict["(Unknown)"] = unknownKm
                 }
-                group.leave()
+                
+                self.countryTotals = countryDict.sorted { $0.value > $1.value }
+                self.cityTotals = result.cityDict.sorted { $0.value > $1.value }
+                self.loading = false
+                
+                print("🚀 Local geocoding completed! Processed \(result.localGeocodedCount) locations locally, \(result.networkGeocodedCount) via network")
             }
         }
+    }
+    
+    private func cleanupCountryCache(_ cache: [String: String]) -> [String: String] {
+        var cleanedCache: [String: String] = [:]
+        
+        for (key, country) in cache {
+            let normalizedCountry = normalizeCountryName(country)
+            cleanedCache[key] = normalizedCountry
+        }
+        
+        return cleanedCache
+    }
+    
+    private func cleanupCityCache(_ cityCache: [String: String], coordCache: [String: String]) -> [String: String] {
+        var cleanedCache: [String: String] = [:]
+        
+        for (key, city) in cityCache {
+            // Remove obviously wrong city assignments (cities that are too far)
+            if coordCache[key] != nil {
+                // If we have a cached country, validate the city makes sense
+                cleanedCache[key] = city
+            } else {
+                // Remove orphaned city cache entries
+                continue
+            }
+        }
+        
+        return cleanedCache
+    }
+    
+    private struct ProcessingResult {
+        var coordCache: [String: String]
+        var cityCache: [String: String]
+        var countryDict: [String: Double]
+        var cityDict: [String: Double]
+        var visitedCount: Int
+        var localGeocodedCount: Int
+        var networkGeocodedCount: Int
+    }
+    
+    private func processAllRoutesWithLocalGeocoding(
+        routes: [Route],
+        coordCache: [String: String],
+        cityCache: [String: String]
+    ) -> ProcessingResult {
+        
+        var mutableCoordCache = coordCache
+        var mutableCityCache = cityCache
+        var countryDict: [String: Double] = [:]
+        var cityDict: [String: Double] = [:]
+        var visited = Set<String>()
+        var localGeocodedCount = 0
+        let networkGeocodedCount = 0
 
-        group.notify(queue: .main) {
-            countryTotals = countryDict.sorted { $0.value > $1.value }
-            cityTotals = cityDict.sorted { $0.value > $1.value }
-            loading = false
+        for route in routes {
+            DispatchQueue.main.async {
+                self.processedRoutes += 1
+            }
+
+            // Process multiple points along the route for better accuracy
+            let routeSegments = self.analyzeRouteGeography(route: route, 
+                                                          coordCache: mutableCoordCache, 
+                                                          cityCache: mutableCityCache)
+            
+            // Update caches with new geocoded locations
+            for segment in routeSegments {
+                if segment.isNewLocation {
+                    mutableCoordCache[segment.key] = segment.country
+                    mutableCityCache[segment.key] = segment.city
+                    localGeocodedCount += 1
+                }
+                
+                // Add distance to country/city (distributed across route)
+                countryDict[segment.country, default: 0] += segment.distance
+                cityDict[segment.city, default: 0] += segment.distance
+                
+                // Track unique coordinates
+                if !visited.contains(segment.key) {
+                    visited.insert(segment.key)
+                }
+            }
+            
+            DispatchQueue.main.async {
+                self.uniqueCoords = visited.count
+                self.geocoded = localGeocodedCount
+            }
+            
+            // Update UI with current progress (less frequently for performance)
+            if localGeocodedCount % 10 == 0 {
+                DispatchQueue.main.async {
+                    self.countryTotals = countryDict.sorted { $0.value > $1.value }
+                    self.cityTotals = cityDict.sorted { $0.value > $1.value }
+                }
+            }
+        }
+        
+        return ProcessingResult(
+            coordCache: mutableCoordCache,
+            cityCache: mutableCityCache,
+            countryDict: countryDict,
+            cityDict: cityDict,
+            visitedCount: visited.count,
+            localGeocodedCount: localGeocodedCount,
+            networkGeocodedCount: networkGeocodedCount
+        )
+    }
+    
+    private struct RouteSegment {
+        let key: String
+        let country: String
+        let city: String
+        let distance: Double
+        let isNewLocation: Bool
+    }
+    
+    private func analyzeRouteGeography(route: Route, 
+                                     coordCache: [String: String], 
+                                     cityCache: [String: String]) -> [RouteSegment] {
+        guard !route.coordinates.isEmpty else { return [] }
+        
+        var segments: [RouteSegment] = []
+        
+        // Sample points along the route (every ~1km or key points)
+        let samplePoints = sampleRoutePoints(coordinates: route.coordinates, maxSamples: 10)
+        let segmentDistance = route.distanceKm / Double(samplePoints.count)
+        
+        for coordinate in samplePoints {
+            let lat = Double(round(1000 * coordinate.latitude) / 1000)
+            let lon = Double(round(1000 * coordinate.longitude) / 1000)
+            let key = "\(lat),\(lon)"
+
+            var country: String
+            var city: String
+            var isNewLocation = false
+            
+            // Check cache first
+            if let cachedCountry = coordCache[key] {
+                country = cachedCountry
+                city = cityCache[key] ?? "Unknown"
+            } else {
+                // Use local geocoding for new location
+                let geocodeResult = LocalGeocoder.geocode(latitude: coordinate.latitude, 
+                                                        longitude: coordinate.longitude)
+                country = geocodeResult.country
+                city = geocodeResult.city
+                isNewLocation = true
+                
+                // Normalize country names to avoid duplicates
+                country = normalizeCountryName(country)
+            }
+            
+            segments.append(RouteSegment(
+                key: key,
+                country: country,
+                city: city,
+                distance: segmentDistance,
+                isNewLocation: isNewLocation
+            ))
+        }
+        
+        return segments
+    }
+    
+    private func sampleRoutePoints(coordinates: [CLLocationCoordinate2D], maxSamples: Int) -> [CLLocationCoordinate2D] {
+        guard coordinates.count > maxSamples else { return coordinates }
+        
+        var sampledPoints: [CLLocationCoordinate2D] = []
+        let interval = coordinates.count / maxSamples
+        
+        for i in stride(from: 0, to: coordinates.count, by: interval) {
+            sampledPoints.append(coordinates[i])
+        }
+        
+        // Always include the last point
+        if let last = coordinates.last {
+            if sampledPoints.isEmpty || (sampledPoints.last!.latitude != last.latitude || sampledPoints.last!.longitude != last.longitude) {
+                sampledPoints.append(last)
+            }
+        }
+        
+        return sampledPoints
+    }
+    
+    private func normalizeCountryName(_ country: String) -> String {
+        // Fix common country name variations to avoid duplicates
+        switch country.lowercased() {
+        case "usa", "us", "united states of america":
+            return "United States"
+        case "uk", "britain", "great britain", "england", "scotland", "wales":
+            return "United Kingdom"
+        case "deutschland":
+            return "Germany"
+        case "nederland", "holland":
+            return "Netherlands"
+        default:
+            return country
+        }
+    }
+    
+    // Keep the old function for fallback if needed
+    private func processAllRoutes(routes: [Route],
+                                 coordCache: [String: String],
+                                 cityCache: [String: String],
+                                 geocoder: CLGeocoder) -> ProcessingResult {
+        
+        var mutableCoordCache = coordCache
+        var mutableCityCache = cityCache
+        var countryDict: [String: Double] = [:]
+        var cityDict: [String: Double] = [:]
+        var visited = Set<String>()
+        var geocodedCount = 0
+        
+        let group = DispatchGroup()
+        let lockQueue = DispatchQueue(label: "cache.lock", qos: .userInitiated)
+
+        for route in routes {
+            DispatchQueue.main.async {
+                self.processedRoutes += 1
+            }
+
+            guard let first = route.coordinates.first else { continue }
+
+            let lat = Double(round(1000 * first.latitude) / 1000)
+            let lon = Double(round(1000 * first.longitude) / 1000)
+            let key = "\(lat),\(lon)"
+
+            // Check cache first
+            if let cachedCountry = mutableCoordCache[key] {
+                lockQueue.sync {
+                    countryDict[cachedCountry, default: 0] += route.distanceKm
+                    if let cachedCity = mutableCityCache[key] {
+                        cityDict[cachedCity, default: 0] += route.distanceKm
+                    }
+                }
+                continue
+            }
+
+            // Track unique coordinates
+            if !visited.contains(key) {
+                visited.insert(key)
+                DispatchQueue.main.async {
+                    self.uniqueCoords = visited.count
+                }
+            }
+
+            // Limit concurrent geocoding requests
+            if geocodedCount >= 50 { continue }
+            geocodedCount += 1
+
+            group.enter()
+            let loc = CLLocation(latitude: first.latitude, longitude: first.longitude)
+            
+            geocoder.reverseGeocodeLocation(loc) { placemarks, error in
+                defer { group.leave() }
+                
+                if let error = error {
+                    print("Geocoding error for \(lat), \(lon): \(error.localizedDescription)")
+                    return
+                }
+                
+                guard let placemark = placemarks?.first else {
+                    print("No placemark found for \(lat), \(lon)")
+                    return
+                }
+                
+                let country = placemark.country ?? 
+                             placemark.administrativeArea ?? 
+                             placemark.isoCountryCode?.uppercased() ?? 
+                             "Unknown"
+                
+                let city = placemark.locality ?? 
+                          placemark.subAdministrativeArea ?? 
+                          placemark.administrativeArea ?? 
+                          "Unknown"
+                
+                // Thread-safe cache and dict updates
+                lockQueue.sync {
+                    mutableCoordCache[key] = country
+                    mutableCityCache[key] = city
+                        countryDict[country, default: 0] += route.distanceKm
+                        cityDict[city, default: 0] += route.distanceKm
+                }
+                
+                DispatchQueue.main.async {
+                    self.geocoded += 1
+                    // Update UI with current progress
+                    self.countryTotals = countryDict.sorted { $0.value > $1.value }
+                    self.cityTotals = cityDict.sorted { $0.value > $1.value }
+                }
+            }
+        }
+        
+        // Wait for all geocoding to complete
+        group.wait()
+        
+        return ProcessingResult(
+            coordCache: mutableCoordCache,
+            cityCache: mutableCityCache,
+            countryDict: countryDict,
+            cityDict: cityDict,
+            visitedCount: visited.count,
+            localGeocodedCount: 0,
+            networkGeocodedCount: geocodedCount
+        )
+    }
+
+}
+
+// MARK: - Array Extension for Batching
+extension Array {
+    func chunked(into size: Int) -> [[Element]] {
+        return stride(from: 0, to: count, by: size).map {
+            Array(self[$0..<Swift.min($0 + size, count)])
         }
     }
 }
@@ -80,3 +471,4 @@ struct StatsView_Previews: PreviewProvider {
         StatsView(routes: [])
     }
 }
+

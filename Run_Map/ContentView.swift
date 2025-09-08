@@ -32,6 +32,12 @@ final class Route: Identifiable {
     let coordinates: [CLLocationCoordinate2D]
     let date: Date
     let workoutType: HKWorkoutActivityType
+    let durationSec: Double
+
+    lazy var averageSpeedKmH: Double = {
+        guard durationSec > 0 else { return 0 }
+        return distanceKm / (durationSec / 3600)
+    }()
     
     /// Cached length in kilometres (computed only once).
     lazy var distanceKm: Double = {
@@ -45,10 +51,93 @@ final class Route: Identifiable {
     
     init(coordinates: [CLLocationCoordinate2D],
          date: Date,
-         workoutType: HKWorkoutActivityType) {
+         workoutType: HKWorkoutActivityType,
+         durationSec: Double) {
         self.coordinates = coordinates
         self.date = date
         self.workoutType = workoutType
+        self.durationSec = durationSec
+    }
+}
+
+// MARK: - Persistable Route Data
+
+struct PersistedRoute: Codable {
+    let id: UUID
+    let coordinates: [[String: Double]]
+    let date: Date
+    let workoutType: UInt
+    let durationSec: Double
+    
+    init(from route: Route) {
+        self.id = route.id
+        self.coordinates = route.coordinates.map { ["lat": $0.latitude, "lon": $0.longitude] }
+        self.date = route.date
+        self.workoutType = route.workoutType.rawValue
+        self.durationSec = route.durationSec
+    }
+    
+    func toRoute() -> Route {
+        let coords = coordinates.compactMap { dict -> CLLocationCoordinate2D? in
+            guard let lat = dict["lat"], let lon = dict["lon"] else { return nil }
+            return CLLocationCoordinate2D(latitude: lat, longitude: lon)
+        }
+        return Route(
+            coordinates: coords,
+            date: date,
+            workoutType: HKWorkoutActivityType(rawValue: workoutType) ?? .other,
+            durationSec: durationSec
+        )
+    }
+}
+
+// MARK: - Route Persistence Manager
+
+class RouteStorage {
+    private let fileManager = FileManager.default
+    private let fileName = "cached_routes.json"
+    
+    private var fileURL: URL {
+        let documentsPath = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return documentsPath.appendingPathComponent(fileName)
+    }
+    
+    func saveRoutes(_ routes: [Route]) {
+        do {
+            let persistedRoutes = routes.map { PersistedRoute(from: $0) }
+            let data = try JSONEncoder().encode(persistedRoutes)
+            try data.write(to: fileURL)
+            print("✅ Saved \(routes.count) routes to cache")
+        } catch {
+            print("❌ Failed to save routes: \(error.localizedDescription)")
+        }
+    }
+    
+    func loadRoutes() -> [Route] {
+        do {
+            let data = try Data(contentsOf: fileURL)
+            let persistedRoutes = try JSONDecoder().decode([PersistedRoute].self, from: data)
+            let routes = persistedRoutes.map { $0.toRoute() }
+            print("✅ Loaded \(routes.count) routes from cache")
+            return routes
+        } catch {
+            print("ℹ️ No cached routes found or failed to load: \(error.localizedDescription)")
+            return []
+        }
+    }
+    
+    func getLastSyncDate() -> Date? {
+        return UserDefaults.standard.object(forKey: "lastRouteSyncDate") as? Date
+    }
+    
+    func setLastSyncDate(_ date: Date) {
+        UserDefaults.standard.set(date, forKey: "lastRouteSyncDate")
+    }
+    
+    func clearCache() {
+        try? fileManager.removeItem(at: fileURL)
+        UserDefaults.standard.removeObject(forKey: "lastRouteSyncDate")
+        print("🗑️ Cleared route cache")
     }
 }
 
@@ -85,65 +174,135 @@ class RunViewModel: ObservableObject {
     }
 
     let healthManager = HealthKitManager()
+    let routeStorage = RouteStorage()
     
     func loadRuns() {
+        // First, load cached routes immediately for instant UI
+        let cachedRoutes = routeStorage.loadRoutes()
+        if !cachedRoutes.isEmpty {
+            DispatchQueue.main.async {
+                self.routes = cachedRoutes
+                self.hasContent = true
+                self.loadProgress = 1.0
+            }
+        }
+        
+        // Then fetch new routes in background
+        loadNewRuns()
+    }
+    
+    func loadAllRunsFromScratch() {
+        // Clear existing routes and cache
+        DispatchQueue.main.async {
+            self.routes.removeAll()
+            self.hasContent = false
+        }
+        routeStorage.clearCache()
+        
         healthManager.fetchRunningWorkouts { workouts in
             DispatchQueue.main.async {
                 self.totalToLoad = workouts.count
                 self.loadedCount = 0
                 self.loadProgress = workouts.isEmpty ? 1 : 0
             }
+            
+            var newRoutes: [Route] = []
+            let group = DispatchGroup()
+            
             for workout in workouts {
+                group.enter()
                 self.healthManager.fetchRoute(for: workout) { locations in
                     let coordinates = locations.map { $0.coordinate }
                     let segments = self.filterRoute(coordinates)
+                    
+                    for segment in segments {
+                        let route = Route(coordinates: segment,
+                                        date: workout.startDate,
+                                        workoutType: workout.workoutActivityType,
+                                        durationSec: workout.duration)
+                        newRoutes.append(route)
+                    }
+                    
                     DispatchQueue.main.async {
-                        for segment in segments {
-                            self.routes.append(Route(coordinates: segment,
-                                                     date: workout.startDate,
-                                                     workoutType: workout.workoutActivityType))
-                        }
                         self.loadedCount += 1
                         if self.totalToLoad > 0 {
                             self.loadProgress = Double(self.loadedCount) / Double(self.totalToLoad)
                         }
-                        self.hasContent = !self.routes.isEmpty
                     }
+                    group.leave()
                 }
+            }
+            
+            group.notify(queue: .main) {
+                self.routes = newRoutes.sorted { $0.date > $1.date }
+                self.hasContent = !self.routes.isEmpty
+                self.routeStorage.saveRoutes(self.routes)
+                self.routeStorage.setLastSyncDate(Date())
             }
         }
     }
     
     func loadNewRuns() {
-        guard let latest = routes.map(\.date).max() else {
-            loadRuns()
-            return
-        }
+        // Use either the latest cached route date or last sync date
+        let lastSyncDate = routeStorage.getLastSyncDate()
+        let latestRouteDate = routes.map(\.date).max()
+        
+        let sinceDate = [lastSyncDate, latestRouteDate].compactMap { $0 }.max() ?? Date.distantPast
         
         healthManager.fetchRunningWorkouts { workouts in
-            let newWorkouts = workouts.filter { $0.startDate > latest }
+            let newWorkouts = workouts.filter { $0.startDate > sinceDate }
+            
+            guard !newWorkouts.isEmpty else {
+                DispatchQueue.main.async {
+                    self.loadProgress = 1.0
+                }
+                return
+            }
+            
             DispatchQueue.main.async {
                 self.totalToLoad = newWorkouts.count
                 self.loadedCount = 0
-                self.loadProgress = newWorkouts.isEmpty ? 1 : 0
+                self.loadProgress = 0
             }
+            
+            var newRoutes: [Route] = []
+            let group = DispatchGroup()
+            
             for workout in newWorkouts {
+                group.enter()
                 self.healthManager.fetchRoute(for: workout) { locations in
                     let coordinates = locations.map { $0.coordinate }
                     let segments = self.filterRoute(coordinates)
+                    
+                    for segment in segments {
+                        let route = Route(coordinates: segment,
+                                        date: workout.startDate,
+                                        workoutType: workout.workoutActivityType,
+                                        durationSec: workout.duration)
+                        newRoutes.append(route)
+                    }
+                    
                     DispatchQueue.main.async {
-                        for segment in segments {
-                            self.routes.append(Route(coordinates: segment,
-                                                     date: workout.startDate,
-                                                     workoutType: workout.workoutActivityType))
-                        }
                         self.loadedCount += 1
                         if self.totalToLoad > 0 {
                             self.loadProgress = Double(self.loadedCount) / Double(self.totalToLoad)
                         }
-                        self.hasContent = !self.routes.isEmpty
                     }
+                    group.leave()
                 }
+            }
+            
+            group.notify(queue: .main) {
+                if !newRoutes.isEmpty {
+                    self.routes.append(contentsOf: newRoutes)
+                    self.routes.sort { $0.date > $1.date }
+                    self.hasContent = !self.routes.isEmpty
+                    
+                    // Save updated routes to cache
+                    self.routeStorage.saveRoutes(self.routes)
+                }
+                self.routeStorage.setLastSyncDate(Date())
+                self.loadProgress = 1.0
             }
         }
     }
@@ -188,6 +347,7 @@ class RoutePolyline: MKPolyline {
     var routeDate: Date?
     var workoutType: HKWorkoutActivityType?
     var isHighlighted: Bool = false
+    var averageSpeed: Double?
 }
 
 private extension RoutePolyline {
@@ -243,8 +403,8 @@ struct ContentView: View {
         span: MKCoordinateSpan(latitudeDelta: 0.1, longitudeDelta: 0.1)
     )
     @State private var isLoading = true
-    @State private var highlightedRouteID: UUID?
-    @State private var showLatestLabel = false
+    @State private var highlightedRouteIDs: Set<UUID> = []
+    @State private var showLatestDayLabel = false
     @State private var showUserLocation = true
     @State private var showNoWorkouts = false
 
@@ -254,6 +414,8 @@ struct ContentView: View {
     @State private var trackingTimer: Timer?
     @State private var showControls = false
     @State private var showStats = false
+    // Speed color toggle state
+    @State private var colorBySpeed = false
 
     // Stats banner state
     @AppStorage("lastRunCount") private var lastRunCount = 0
@@ -271,14 +433,16 @@ struct ContentView: View {
             .clipShape(Circle())
     }
 
+
     var body: some View {
         ZStack {
             RouteMapView(routes: viewModel.displayedRoutes,
                          region: region,
-                         highlightedRouteID: highlightedRouteID,
+                         highlightedRouteIDs: highlightedRouteIDs,
                          showUserLocation: showUserLocation,
                          liveCoordinates: liveCoordinates,
-                         mapType: mapType)
+                         mapType: mapType,
+                         colorBySpeed: colorBySpeed)
                 .ignoresSafeArea()
             
             VStack {
@@ -290,8 +454,8 @@ struct ContentView: View {
                 }
 
                 Spacer()
-                if showLatestLabel {
-                    Text("Latest Workout")
+                if showLatestDayLabel {
+                    Text("Latest Day")
                         .font(.headline).bold()
                         .padding(12)
                         .background(Color.black.opacity(0.75))
@@ -328,15 +492,26 @@ struct ContentView: View {
                         circleButton(icon: "flame.fill")
                             .onTapGesture {
                                 if let latest = viewModel.routes.sorted(by: { $0.date > $1.date }).first {
-                                    highlightedRouteID = latest.id
-                                    region = coordinateRegion(for: latest.coordinates)
-                                    showLatestLabel = true
+                                    let calendar = Calendar.current
+                                    
+                                    // Find all routes from the same day
+                                    let routesFromLatestDay = viewModel.routes.filter { route in
+                                        calendar.isDate(route.date, inSameDayAs: latest.date)
+                                    }
+                                    
+                                    highlightedRouteIDs = Set(routesFromLatestDay.map { $0.id })
+                                    
+                                    // Create region that encompasses all routes from that day
+                                    let allCoordinates = routesFromLatestDay.flatMap { $0.coordinates }
+                                    region = coordinateRegion(for: allCoordinates)
+                                    
+                                    showLatestDayLabel = true
                                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                                        showLatestLabel = false
+                                        showLatestDayLabel = false
                                     }
                                 }
                             }
-                            .onLongPressGesture { highlightedRouteID = nil }
+                            .onLongPressGesture { highlightedRouteIDs.removeAll() }
 
                         // Tracking button
                         circleButton(icon: isTracking ? "pause.circle" : "dot.circle",
@@ -370,10 +545,27 @@ struct ContentView: View {
                                 )
                             }
 
+                        // Speed color toggle button
+                        circleButton(icon: "speedometer")
+                            .onTapGesture {
+                                colorBySpeed.toggle()
+                            }
+
                         // Stats button
                         circleButton(icon: "chart.bar")
                             .onTapGesture {
                                 showStats = true
+                            }
+
+                        // Cache management button
+                        circleButton(icon: "trash.circle", bg: .orange)
+                            .onTapGesture {
+                                viewModel.routeStorage.clearCache()
+                                viewModel.routes.removeAll()
+                                viewModel.hasContent = false
+                                highlightedRouteIDs.removeAll()
+                                isLoading = true
+                                viewModel.loadAllRunsFromScratch()
                             }
                     }
 
@@ -393,8 +585,13 @@ struct ContentView: View {
                 viewModel.loadRuns()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
                     if let latest = viewModel.routes.sorted(by: { $0.date > $1.date }).first {
-                        highlightedRouteID = latest.id
-                        region = coordinateRegion(for: latest.coordinates)
+                        let calendar = Calendar.current
+                        let routesFromLatestDay = viewModel.routes.filter { route in
+                            calendar.isDate(route.date, inSameDayAs: latest.date)
+                        }
+                        highlightedRouteIDs = Set(routesFromLatestDay.map { $0.id })
+                        let allCoordinates = routesFromLatestDay.flatMap { $0.coordinates }
+                        region = coordinateRegion(for: allCoordinates)
                     }
                     isLoading = false
                 }
@@ -410,10 +607,14 @@ struct ContentView: View {
                 if !hasShownSummary {
                     let newRuns = viewModel.routes.count - lastRunCount
                     let newDistance = viewModel.totalDistanceKm - lastDistanceKm
-                    if hasLaunchedBefore && (newRuns > 0 || newDistance > 0) {
-                        summaryMessage = "You added \(newRuns) runs for " +
-                            String(format: "%.1f", newDistance) +
-                            " km since your last visit. Great job!"
+                    if hasLaunchedBefore {
+                        if newRuns == 0 && newDistance == 0 {
+                            summaryMessage = "Go explore!"
+                        } else {
+                            summaryMessage = "You added \(newRuns) runs for " +
+                                String(format: "%.1f", newDistance) +
+                                " km since your last visit. Great job!"
+                        }
                         showSummaryAlert = true
                     }
                     lastRunCount = viewModel.routes.count
@@ -457,7 +658,8 @@ struct ContentView: View {
                 viewModel.routes.append(
                     Route(coordinates: coords,
                           date: Date.distantPast,
-                          workoutType: name.contains("Run") ? .running : .walking)
+                          workoutType: .walking,
+                          durationSec: 0)
                 )
             }
         }
@@ -470,10 +672,12 @@ struct ContentView: View {
             trackingTimer = nil
             isTracking = false
             if liveCoordinates.count > 1 {
+                let est = Double(max(liveCoordinates.count - 1, 1)) * 5
                 viewModel.routes.append(
                     Route(coordinates: liveCoordinates,
                           date: Date(),
-                          workoutType: .other)
+                          workoutType: .other,
+                          durationSec: est)
                 )
             }
             liveCoordinates.removeAll()
@@ -499,10 +703,11 @@ struct ContentView: View {
 struct RouteMapView: UIViewRepresentable {
     var routes: [Route]
     var region: MKCoordinateRegion
-    var highlightedRouteID: UUID?
+    var highlightedRouteIDs: Set<UUID>
     var showUserLocation: Bool
     var liveCoordinates: [CLLocationCoordinate2D]
     var mapType: MKMapType
+    var colorBySpeed: Bool
     
     func makeUIView(context: Context) -> MKMapView {
         let mapView = MKMapView()
@@ -514,15 +719,7 @@ struct RouteMapView: UIViewRepresentable {
     }
 
     func updateUIView(_ mapView: MKMapView, context: Context) {
-        // Skip automatic recentering while tracking
-        if liveCoordinates.isEmpty {
-            if mapView.region.center.latitude != region.center.latitude ||
-               mapView.region.center.longitude != region.center.longitude ||
-               mapView.region.span.latitudeDelta != region.span.latitudeDelta ||
-               mapView.region.span.longitudeDelta != region.span.longitudeDelta {
-                mapView.setRegion(region, animated: true)
-            }
-        }
+        // Removed automatic recentering to prevent constant snapping back to Berlin.
 
         if mapView.showsUserLocation != showUserLocation {
             mapView.showsUserLocation = showUserLocation
@@ -573,14 +770,15 @@ struct RouteMapView: UIViewRepresentable {
             pl.routeID = route.id
             pl.routeDate = route.date
             pl.workoutType = route.workoutType
-            pl.isHighlighted = (route.id == highlightedRouteID)
+            pl.isHighlighted = highlightedRouteIDs.contains(route.id)
+            pl.averageSpeed = route.averageSpeedKmH
             toAdd.append(pl)
         }
         if !toAdd.isEmpty { mapView.addOverlays(toAdd) }
 
         // Update highlighting
         for pl in mapView.overlays.compactMap({ $0 as? RoutePolyline }) {
-            let shouldHighlight = (pl.routeID == highlightedRouteID)
+            let shouldHighlight = pl.routeID.map { highlightedRouteIDs.contains($0) } ?? false
             if pl.isHighlighted != shouldHighlight {
                 pl.isHighlighted = shouldHighlight
                 if let r = mapView.renderer(for: pl) as? MKPolylineRenderer {
@@ -594,20 +792,28 @@ struct RouteMapView: UIViewRepresentable {
     }
 
     // Create the coordinator that acts as MKMapViewDelegate
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
-    }
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
     
     class Coordinator: NSObject, MKMapViewDelegate {
+        let parent: RouteMapView
+        init(_ parent: RouteMapView) { self.parent = parent }
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
             guard let polyline = overlay as? RoutePolyline else {
                 return MKOverlayRenderer(overlay: overlay)
             }
             
             let renderer = MKPolylineRenderer(polyline: polyline)
-            // If this polyline is marked as highlighted, render it in orange.
             if polyline.isHighlighted {
                 renderer.strokeColor = .orange
+            } else if parent.colorBySpeed, let v = polyline.averageSpeed {
+                renderer.strokeColor = {
+                    switch v {
+                    case ..<6:  .systemBlue
+                    case ..<9:  .systemGreen
+                    case ..<12: .systemOrange
+                    default:    .systemRed
+                    }
+                }()
             } else {
                 switch polyline.workoutType {
                 case .running:
@@ -681,7 +887,7 @@ struct OnboardingView: View {
             VStack(spacing: 24) {
                 Image(systemName: "flame.fill")
                     .resizable().scaledToFit().frame(height: 120)
-                Text("Tap the 🔥 to jump to your latest workout.\nLong‑press to clear the highlight.")
+                Text("Tap the 🔥 to jump to your latest day's workouts.\nLong‑press to clear the highlight.")
                     .font(.title3).multilineTextAlignment(.center)
             }
             .padding()
