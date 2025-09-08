@@ -100,6 +100,12 @@ struct StatsView: View {
     }
 
     private func computeStats() {
+        // Validate routes array first
+        guard !routes.isEmpty else {
+            loading = false
+            return
+        }
+        
         routeTotal = routes.count
         processedRoutes = 0
         uniqueCoords = 0
@@ -107,16 +113,37 @@ struct StatsView: View {
         heuristicallyClassified = 0
 
         loading = true
-        totalKm = routes.reduce(0) { $0 + $1.distanceKm }
+        
+        // Safely calculate total km with error handling
+        totalKm = routes.compactMap { route in
+            guard route.coordinates.count > 0 else {
+                print("⚠️ Found route with no coordinates: \(route.id)")
+                return nil
+            }
+            return route.distanceKm
+        }.reduce(0, +)
 
         // Use fast local geocoding with fallback to network geocoding
         let serialQueue = DispatchQueue(label: "stats.processing", qos: .userInitiated)
         
         // Load existing caches and clean them up
-        var coordCache = UserDefaults.standard
-            .dictionary(forKey: "coordCountryCache") as? [String: String] ?? [:]
-        var cityCache = UserDefaults.standard
-            .dictionary(forKey: "coordCityCache") as? [String: String] ?? [:]
+        var coordCache: [String: String] = [:]
+        var cityCache: [String: String] = [:]
+        
+        // Safely load cache with error handling
+        if let rawCoordCache = UserDefaults.standard.object(forKey: "coordCountryCache") as? [String: String] {
+            coordCache = rawCoordCache
+        } else {
+            print("⚠️ Invalid or missing coordCountryCache, starting fresh")
+            UserDefaults.standard.removeObject(forKey: "coordCountryCache")
+        }
+        
+        if let rawCityCache = UserDefaults.standard.object(forKey: "coordCityCache") as? [String: String] {
+            cityCache = rawCityCache
+        } else {
+            print("⚠️ Invalid or missing coordCityCache, starting fresh")
+            UserDefaults.standard.removeObject(forKey: "coordCityCache")
+        }
         
         // Clean up old cached data with inconsistent country names
         coordCache = cleanupCountryCache(coordCache)
@@ -206,6 +233,12 @@ struct StatsView: View {
         for route in routes {
             DispatchQueue.main.async {
                 self.processedRoutes += 1
+            }
+            
+            // Validate route before processing
+            guard !route.coordinates.isEmpty else {
+                print("⚠️ Skipping route with no coordinates: \(route.id)")
+                continue
             }
 
             // Process multiple points along the route for better accuracy
