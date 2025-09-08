@@ -117,7 +117,15 @@ class RouteStorage {
         do {
             let data = try Data(contentsOf: fileURL)
             let persistedRoutes = try JSONDecoder().decode([PersistedRoute].self, from: data)
-            let routes = persistedRoutes.map { $0.toRoute() }
+            let routes = persistedRoutes.compactMap { persistedRoute -> Route? in
+                let route = persistedRoute.toRoute()
+                // Filter out routes with no coordinates
+                guard !route.coordinates.isEmpty else {
+                    print("⚠️ Filtering out cached route with no coordinates: \(route.id)")
+                    return nil
+                }
+                return route
+            }
             print("✅ Loaded \(routes.count) routes from cache")
             return routes
         } catch {
@@ -213,9 +221,20 @@ class RunViewModel: ObservableObject {
                 group.enter()
                 self.healthManager.fetchRoute(for: workout) { locations in
                     let coordinates = locations.map { $0.coordinate }
+                    
+                    // Only process workouts that have GPS data
+                    guard !coordinates.isEmpty else {
+                        print("⚠️ Skipping workout with no GPS data: \(workout.startDate)")
+                        group.leave()
+                        return
+                    }
+                    
                     let segments = self.filterRoute(coordinates)
                     
                     for segment in segments {
+                        // Only create routes with meaningful coordinate data
+                        guard segment.count > 1 else { continue }
+                        
                         let route = Route(coordinates: segment,
                                         date: workout.startDate,
                                         workoutType: workout.workoutActivityType,
@@ -272,9 +291,20 @@ class RunViewModel: ObservableObject {
                 group.enter()
                 self.healthManager.fetchRoute(for: workout) { locations in
                     let coordinates = locations.map { $0.coordinate }
+                    
+                    // Only process workouts that have GPS data
+                    guard !coordinates.isEmpty else {
+                        print("⚠️ Skipping workout with no GPS data: \(workout.startDate)")
+                        group.leave()
+                        return
+                    }
+                    
                     let segments = self.filterRoute(coordinates)
                     
                     for segment in segments {
+                        // Only create routes with meaningful coordinate data
+                        guard segment.count > 1 else { continue }
+                        
                         let route = Route(coordinates: segment,
                                         date: workout.startDate,
                                         workoutType: workout.workoutActivityType,
@@ -557,16 +587,6 @@ struct ContentView: View {
                                 showStats = true
                             }
 
-                        // Cache management button
-                        circleButton(icon: "trash.circle", bg: .orange)
-                            .onTapGesture {
-                                viewModel.routeStorage.clearCache()
-                                viewModel.routes.removeAll()
-                                viewModel.hasContent = false
-                                highlightedRouteIDs.removeAll()
-                                isLoading = true
-                                viewModel.loadAllRunsFromScratch()
-                            }
                     }
 
                     // Main FAB that toggles the stack
