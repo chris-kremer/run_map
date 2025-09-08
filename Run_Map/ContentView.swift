@@ -41,7 +41,8 @@ final class Route: Identifiable {
     
     /// Cached length in kilometres (computed only once).
     lazy var distanceKm: Double = {
-        coordinates.adjacentPairs()
+        guard coordinates.count > 1 else { return 0.0 }
+        return coordinates.adjacentPairs()
             .map { from, to in
                 CLLocation(latitude: from.latitude, longitude: from.longitude)
                     .distance(from: CLLocation(latitude: to.latitude, longitude: to.longitude))

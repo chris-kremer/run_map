@@ -116,11 +116,17 @@ struct StatsView: View {
         
         // Safely calculate total km with error handling
         totalKm = routes.compactMap { route in
-            guard route.coordinates.count > 0 else {
-                print("⚠️ Found route with no coordinates: \(route.id)")
+            guard route.coordinates.count > 1 else {
+                print("⚠️ Found route with insufficient coordinates: \(route.id) (count: \(route.coordinates.count))")
                 return nil
             }
-            return route.distanceKm
+            // Safely access distanceKm with additional protection
+            let distance = route.distanceKm
+            guard distance.isFinite && distance >= 0 else {
+                print("⚠️ Invalid distance calculated for route: \(route.id) (distance: \(distance))")
+                return nil
+            }
+            return distance
         }.reduce(0, +)
 
         // Use fast local geocoding with fallback to network geocoding
@@ -307,7 +313,14 @@ struct StatsView: View {
         // Sample points along the route (every ~1km or key points)
         let samplePoints = sampleRoutePoints(coordinates: route.coordinates, maxSamples: 10)
         guard !samplePoints.isEmpty else { return [] }
-        let segmentDistance = route.distanceKm / Double(samplePoints.count)
+        
+        // Safely calculate segment distance
+        let totalDistance = route.distanceKm
+        guard totalDistance.isFinite && totalDistance >= 0 else {
+            print("⚠️ Invalid total distance for route: \(route.id) (distance: \(totalDistance))")
+            return []
+        }
+        let segmentDistance = totalDistance / Double(samplePoints.count)
         
         for coordinate in samplePoints {
             let lat = Double(round(1000 * coordinate.latitude) / 1000)
