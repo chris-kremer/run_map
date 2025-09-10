@@ -243,7 +243,7 @@ struct StatsView: View {
             ForEach(Array(displayedCities.enumerated()), id: \.offset) { index, entry in
                 if entry.1 > 0 {
                     Button(action: {
-                        onLocationSelected?(entry.0, "")
+                        onLocationSelected?("", entry.0)
                         dismiss()
                     }) {
                         HStack {
@@ -432,9 +432,13 @@ struct StatsView: View {
                     countryDict["(Unknown)"] = unknownKm
                 }
                 
+                // Safely validate dictionaries before sorting
+                let safeCountryDict = self.validateDictionary(countryDict, name: "countryDict")
+                let safeCityDict = self.validateDictionary(result.cityDict, name: "cityDict")
+                
                 // Safely sort dictionaries with validation
-                self.countryTotals = self.safeSortDictionary(countryDict)
-                self.cityTotals = self.safeSortDictionary(result.cityDict)
+                self.countryTotals = self.safeSortDictionary(safeCountryDict)
+                self.cityTotals = self.safeSortDictionary(safeCityDict)
                 self.loading = false
                 
             }
@@ -550,8 +554,12 @@ struct StatsView: View {
             // Update UI with current progress (less frequently for performance)
             if index % 100 == 0 {
                 DispatchQueue.main.async {
-                    self.countryTotals = self.safeSortDictionary(countryDict)
-                    self.cityTotals = self.safeSortDictionary(cityDict)
+                    // Safely validate dictionaries before sorting
+                    let safeCountryDict = self.validateDictionary(countryDict, name: "countryDict_progress")
+                    let safeCityDict = self.validateDictionary(cityDict, name: "cityDict_progress")
+                    
+                    self.countryTotals = self.safeSortDictionary(safeCountryDict)
+                    self.cityTotals = self.safeSortDictionary(safeCityDict)
                 }
             }
         }
@@ -686,15 +694,56 @@ struct StatsView: View {
         }
     }
     
-    private func safeSortDictionary(_ dict: [String: Double]) -> [(String, Double)] {
-        return dict.compactMap { (key, value) -> (String, Double)? in
-            // Validate that value is valid
-            guard value.isFinite && value >= 0 else {
-                print("⚠️ Invalid value in dictionary for key '\(key)': \(value)")
-                return nil
+    private func validateDictionary(_ dict: [String: Double], name: String) -> [String: Double] {
+        var validDict: [String: Double] = [:]
+        
+        // Check if the dictionary is actually enumerable
+        let mirror = Mirror(reflecting: dict)
+        print("📊 Validating \(name): type=\(type(of: dict)), children=\(mirror.children.count)")
+        
+        // Try to safely access the dictionary
+        if mirror.displayStyle == .dictionary {
+            // It looks like a dictionary, try to enumerate safely
+            var entryCount = 0
+            for (key, value) in dict {
+                entryCount += 1
+                if value.isFinite && value >= 0 {
+                    validDict[key] = value
+                } else {
+                    print("⚠️ Invalid entry in \(name): key=\(type(of: key)), value=\(type(of: value))")
+                }
+                
+                // Safety limit to prevent infinite loops
+                if entryCount > 10000 {
+                    print("⚠️ Too many entries in \(name), truncating")
+                    break
+                }
             }
-            return (key, value)
-        }.sorted { $0.1 > $1.1 }
+            print("📊 \(name) validation complete: \(entryCount) entries processed, \(validDict.count) valid")
+        } else {
+            print("⚠️ \(name) is not a proper dictionary: \(String(describing: mirror.displayStyle))")
+        }
+        
+        return validDict
+    }
+    
+    private func safeSortDictionary(_ dict: [String: Double]) -> [(String, Double)] {
+        // Safely validate and convert the dictionary
+        var validEntries: [(String, Double)] = []
+        
+        // Safely iterate and validate each entry
+        for (key, value) in dict {
+            // Validate the value is finite and non-negative
+            guard value.isFinite && value >= 0 else {
+                print("⚠️ Invalid value for key '\(key)': \(value)")
+                continue
+            }
+            
+            validEntries.append((key, value))
+        }
+        
+        // Sort the valid entries
+        return validEntries.sorted { $0.1 > $1.1 }
     }
     
     // Keep the old function for fallback if needed

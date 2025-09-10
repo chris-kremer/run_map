@@ -578,8 +578,8 @@ struct ContentView: View {
                 Spacer()
                 VStack(spacing: 12) {
                     if showControls {
-                        // Latest‑workout button
-                        circleButton(icon: "flame.fill")
+                        // Highlight button
+                        circleButton(icon: "highlighter")
                             .onTapGesture {
                                 if let latest = viewModel.routes.sorted(by: { $0.date > $1.date }).first {
                                     let calendar = Calendar.current
@@ -623,8 +623,17 @@ struct ContentView: View {
                                 print("🎯 Location button tapped")
                                 if let loc = locationManager.currentLocation {
                                     print("📍 Current location found: \(loc.coordinate)")
+                                    
+                                    // Add a tiny random offset to ensure the region always changes
+                                    // This forces the map to update even if clicking the same location repeatedly
+                                    let randomOffset = Double.random(in: -0.0001...0.0001)
+                                    let adjustedCenter = CLLocationCoordinate2D(
+                                        latitude: loc.coordinate.latitude + randomOffset,
+                                        longitude: loc.coordinate.longitude + randomOffset
+                                    )
+                                    
                                     let newRegion = MKCoordinateRegion(
-                                        center: loc.coordinate,
+                                        center: adjustedCenter,
                                         span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01))
                                     print("🎯 Setting region to: \(newRegion)")
                                     withAnimation(.easeInOut(duration: 1.0)) {
@@ -1194,9 +1203,9 @@ struct OnboardingView: View {
             .padding()
 
             VStack(spacing: 24) {
-                Image(systemName: "flame.fill")
+                Image(systemName: "highlighter")
                     .resizable().scaledToFit().frame(height: 120)
-                Text("Tap the 🔥 to jump to your latest day's workouts.\nLong‑press to clear the highlight.")
+                Text("Tap the highlighter to jump to your latest day's workouts.\nLong‑press to clear the highlight.")
                     .font(.title3).multilineTextAlignment(.center)
             }
             .padding()
