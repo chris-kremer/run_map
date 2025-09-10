@@ -894,8 +894,13 @@ struct ContentView: View {
                 
                 // If we're looking for a specific city, match both country and city
                 if !city.isEmpty && city != "Unknown" {
-                    if geocodeResult.country == country && geocodeResult.city == city {
+                    if !country.isEmpty && geocodeResult.country == country && geocodeResult.city == city {
                         print("✅ City match found: \(geocodeResult.country) / \(geocodeResult.city)")
+                        routeMatches = true
+                        break
+                    } else if country.isEmpty && geocodeResult.city == city {
+                        // City-only search (when country is empty)
+                        print("✅ City-only match found: \(geocodeResult.city) in \(geocodeResult.country)")
                         routeMatches = true
                         break
                     }
@@ -921,9 +926,11 @@ struct ContentView: View {
             let targetRegion = createRegionForLocation(country: country, city: city, routes: matchingRoutes)
             print("🎯 Target region: center=\(targetRegion.center), span=\(targetRegion.span)")
             
+            print("🔄 About to update region state from \(region.center) to \(targetRegion.center)")
             withAnimation(.easeInOut(duration: 1.0)) {
                 region = targetRegion
             }
+            print("🔄 Region state updated to \(region.center)")
             
             // Highlight the matching routes
             highlightedRouteIDs = Set(matchingRoutes.map { $0.id })
@@ -1022,7 +1029,15 @@ struct RouteMapView: UIViewRepresentable {
     }
 
     func updateUIView(_ mapView: MKMapView, context: Context) {
-        // Removed automatic recentering to prevent constant snapping back to Berlin.
+        // Update region when it changes (use larger tolerance to ensure updates work)
+        if !mapView.region.center.isEqual(to: region.center, tolerance: 0.01) ||
+           abs(mapView.region.span.latitudeDelta - region.span.latitudeDelta) > 0.01 ||
+           abs(mapView.region.span.longitudeDelta - region.span.longitudeDelta) > 0.01 {
+            print("🗺️ Map updating region to: center=\(region.center), span=\(region.span)")
+            mapView.setRegion(region, animated: true)
+        } else {
+            print("🗺️ Map region unchanged, skipping update")
+        }
 
         if mapView.showsUserLocation != showUserLocation {
             mapView.showsUserLocation = showUserLocation
@@ -1265,5 +1280,12 @@ private class GPXParserDelegate: NSObject, XMLParserDelegate {
            let lon = Double(lonStr) {
             coordinates.append(CLLocationCoordinate2D(latitude: lat, longitude: lon))
         }
+    }
+}
+
+extension CLLocationCoordinate2D {
+    func isEqual(to other: CLLocationCoordinate2D, tolerance: Double) -> Bool {
+        return abs(latitude - other.latitude) < tolerance &&
+               abs(longitude - other.longitude) < tolerance
     }
 }

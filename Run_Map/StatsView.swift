@@ -243,7 +243,7 @@ struct StatsView: View {
             ForEach(Array(displayedCities.enumerated()), id: \.offset) { index, entry in
                 if entry.1 > 0 {
                     Button(action: {
-                        onLocationSelected?("", entry.0)
+                        onLocationSelected?(entry.0, "")
                         dismiss()
                     }) {
                         HStack {
@@ -390,28 +390,22 @@ struct StatsView: View {
         var cityCache: [String: String] = [:]
         
         // Safely load cache with error handling
-        do {
-            if let rawCoordCache = UserDefaults.standard.object(forKey: "coordCountryCache") {
-                if let validCache = rawCoordCache as? [String: String] {
-                    coordCache = validCache
-                } else {
-                    print("⚠️ Invalid coordCountryCache type: \(type(of: rawCoordCache)), clearing")
-                    UserDefaults.standard.removeObject(forKey: "coordCountryCache")
-                }
+        if let rawCoordCache = UserDefaults.standard.object(forKey: "coordCountryCache") {
+            if let validCache = rawCoordCache as? [String: String] {
+                coordCache = validCache
+            } else {
+                print("⚠️ Invalid coordCountryCache type: \(type(of: rawCoordCache)), clearing")
+                UserDefaults.standard.removeObject(forKey: "coordCountryCache")
             }
-            
-            if let rawCityCache = UserDefaults.standard.object(forKey: "coordCityCache") {
-                if let validCache = rawCityCache as? [String: String] {
-                    cityCache = validCache
-                } else {
-                    print("⚠️ Invalid coordCityCache type: \(type(of: rawCityCache)), clearing")
-                    UserDefaults.standard.removeObject(forKey: "coordCityCache")
-                }
+        }
+        
+        if let rawCityCache = UserDefaults.standard.object(forKey: "coordCityCache") {
+            if let validCache = rawCityCache as? [String: String] {
+                cityCache = validCache
+            } else {
+                print("⚠️ Invalid coordCityCache type: \(type(of: rawCityCache)), clearing")
+                UserDefaults.standard.removeObject(forKey: "coordCityCache")
             }
-        } catch {
-            print("⚠️ Error loading caches: \(error), starting fresh")
-            UserDefaults.standard.removeObject(forKey: "coordCountryCache")
-            UserDefaults.standard.removeObject(forKey: "coordCityCache")
         }
         
         // Clean up old cached data with inconsistent country names
@@ -546,14 +540,10 @@ struct StatsView: View {
                 }
             }
             
+            // Capture the count safely before dispatching
+            let visitedCount = visited.count
             DispatchQueue.main.async {
-                // Safely access visited.count with type checking
-                if let visitedSet = visited as? Set<String> {
-                    self.uniqueCoords = visitedSet.count
-                } else {
-                    print("⚠️ Warning: visited is not a Set, type: \(type(of: visited))")
-                    self.uniqueCoords = 0
-                }
+                self.uniqueCoords = visitedCount
                 self.geocoded = Int(localGeocodedCount)
             }
             
@@ -576,7 +566,7 @@ struct StatsView: View {
             cityCache: mutableCityCache,
             countryDict: countryDict,
             cityDict: cityDict,
-            visitedCount: (visited as? Set<String>)?.count ?? 0,
+            visitedCount: visited.count,
             localGeocodedCount: localGeocodedCount,
             networkGeocodedCount: networkGeocodedCount
         )
@@ -748,14 +738,10 @@ struct StatsView: View {
             // Track unique coordinates
             if !visited.contains(key) {
                 visited.insert(key)
+                // Capture the count safely before dispatching
+                let visitedCount = visited.count
                 DispatchQueue.main.async {
-                    // Safely access visited.count with type checking
-                    if let visitedSet = visited as? Set<String> {
-                        self.uniqueCoords = visitedSet.count
-                    } else {
-                        print("⚠️ Warning: visited is not a Set in concurrent access, type: \(type(of: visited))")
-                        self.uniqueCoords = 0
-                    }
+                    self.uniqueCoords = visitedCount
                 }
             }
 
@@ -814,7 +800,7 @@ struct StatsView: View {
             cityCache: mutableCityCache,
             countryDict: countryDict,
             cityDict: cityDict,
-            visitedCount: (visited as? Set<String>)?.count ?? 0,
+            visitedCount: visited.count,
             localGeocodedCount: 0,
             networkGeocodedCount: geocodedCount
         )
