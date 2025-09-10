@@ -3,6 +3,7 @@ import CoreLocation
 
 struct StatsView: View {
     var routes: [Route]
+    var onLocationSelected: ((String, String) -> Void)? // (country, city) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var totalKm: Double = 0
     @State private var countryTotals: [(String, Double)] = []
@@ -35,71 +36,320 @@ struct StatsView: View {
     }
 
     private var statsContent: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        LazyVStack(spacing: 16) {
             if loading {
-                ProgressView("Loading stats…")
-                    .padding(.bottom, 8)
-
-                Text("Scanned \(processedRoutes)/\(routeTotal) routes • \(uniqueCoords) unique coords • \(geocoded) geocoded")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
+                loadingCard
+            } else if totalKm == 0 {
+                emptyStateCard
+            } else {
+                overviewCard
                 
-                Text("Heuristically classified: \(heuristicallyClassified)")
-                    .font(.caption2)
+                if !countryTotals.isEmpty {
+                    countriesCard
+                }
+                
+                if !cityTotals.isEmpty {
+                    citiesCard
+                }
+            }
+        }
+        .padding()
+    }
+    
+    private var loadingCard: some View {
+        VStack(spacing: 12) {
+            let progress = routeTotal > 0 ? Double(processedRoutes) / Double(routeTotal) : 0.0
+            let percentage = Int(progress * 100)
+            
+            HStack {
+                Image(systemName: "chart.bar.fill")
+                    .foregroundColor(.blue)
+                    .font(.title2)
+                Text("Analyzing Routes")
+                    .font(.headline)
+                Spacer()
+            }
+            
+            ProgressView(value: progress, total: 1.0)
+                .progressViewStyle(LinearProgressViewStyle(tint: .blue))
+            
+            Text("\(percentage)% complete")
+                .font(.caption)
                     .foregroundColor(.secondary)
 
                 if !countryTotals.isEmpty || !cityTotals.isEmpty {
                     Text("Showing partial results…")
+                    .font(.caption2)
+                    .foregroundColor(.orange)
+            }
+        }
+        .padding()
+        .background(Color(.systemBackground))
+        .cornerRadius(12)
+        .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
+    }
+    
+    private var emptyStateCard: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "figure.run")
+                .font(.system(size: 48))
+                .foregroundColor(.orange)
+            
+            Text("Ready to Explore!")
+                .font(.title2)
+                .fontWeight(.semibold)
+            
+            Text("Start running to see your stats here")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(24)
+        .background(Color(.systemBackground))
+        .cornerRadius(12)
+        .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
+    }
+    
+    private var overviewCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Image(systemName: "chart.line.uptrend.xyaxis")
+                    .foregroundColor(.green)
+                    .font(.title2)
+                Text("Running Summary")
+                    .font(.headline)
+                Spacer()
+            }
+            
+            HStack(spacing: 20) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("\(Int(totalKm))")
+                        .font(.title)
+                        .fontWeight(.bold)
+                        .foregroundColor(.green)
+                    Text("Total KM")
                         .font(.caption)
-                        .foregroundColor(.gray)
+                        .foregroundColor(.secondary)
                 }
-            }
-            else if totalKm == 0 {
-                Text("Go explore!")
-                    .font(.headline)
-                    .padding(.bottom, 8)
-            } else {
-                Text("You ran \(Int(totalKm)) km in total.")
-                    .font(.headline)
-                    .padding(.bottom, 8)
-            }
-
-            if !loading && countryTotals.isEmpty && cityTotals.isEmpty {
-                Text("No location data found.")
-                    .font(.subheadline)
-                    .padding(.bottom, 8)
-            }
-            if !countryTotals.isEmpty {
-                Text("Your top countries were:").font(.subheadline)
-                ForEach(Array(countryTotals.enumerated()).filter { $0.element.1 > 0 && (showAllCountries || $0.offset < 3) }, id: \.offset) { idx, entry in
-                    Text("\(idx + 1)) \(entry.0) \(Int(entry.1))km")
-                }
-                if countryTotals.count > 3 {
-                    Button(showAllCountries ? "Show less" : "Show all") {
-                        showAllCountries.toggle()
-                    }
-                    .font(.caption)
-                    .padding(.bottom, 8)
-                }
-            }
-            if !cityTotals.isEmpty {
-                Text("Your top cities were:").font(.subheadline)
-                ForEach(Array(cityTotals.enumerated()).filter { $0.element.1 > 0 && (showAllCities || $0.offset < 3) }, id: \.offset) { idx, entry in
-                    Text("\(idx + 1)) \(entry.0) \(Int(entry.1))km")
-                }
-                if cityTotals.count > 3 {
-                    Button(showAllCities ? "Show less" : "Show all") {
-                        showAllCities.toggle()
-                    }
-                    .font(.caption)
+                
+                Spacer()
+                
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text("\(routes.count)")
+                        .font(.title)
+                        .fontWeight(.bold)
+                        .foregroundColor(.blue)
+                    Text("Workouts")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
+        .background(Color(.systemBackground))
+        .cornerRadius(12)
+        .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
+    }
+    
+    private var countriesCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Image(systemName: "globe")
+                    .foregroundColor(.purple)
+                    .font(.title2)
+                Text("Countries")
+                    .font(.headline)
+                Spacer()
+                Text("\(countryTotals.filter { $0.1 > 0 }.count)")
+                    .font(.title3)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.purple)
+            }
+            
+            let displayedCountries = showAllCountries ? countryTotals : Array(countryTotals.prefix(min(3, countryTotals.count)))
+            
+            ForEach(Array(displayedCountries.enumerated()), id: \.offset) { index, entry in
+                if entry.1 > 0 {
+                    Button(action: {
+                        onLocationSelected?(entry.0, "")
+                        dismiss()
+                    }) {
+                        HStack {
+                            Text(countryFlag(for: entry.0))
+                                .font(.title3)
+                            
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(entry.0)
+                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                                
+                                Text("\(Int(entry.1)) km")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            
+                            Spacer()
+                            
+                            Text("#\(index + 1)")
+                                .font(.caption)
+                                .fontWeight(.medium)
+                                .foregroundColor(.purple)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.purple.opacity(0.1))
+                                .cornerRadius(8)
+                        }
+                        .padding(.vertical, 4)
+                        .foregroundColor(.primary)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                }
+            }
+            
+                if countryTotals.count > 3 {
+                Button(action: { showAllCountries.toggle() }) {
+                    HStack {
+                        Text(showAllCountries ? "Show less" : "Show all \(countryTotals.count) countries")
+                        Image(systemName: showAllCountries ? "chevron.up" : "chevron.down")
+                    }
+                    .font(.caption)
+                    .foregroundColor(.purple)
+                }
+            }
+        }
+        .padding()
+        .background(Color(.systemBackground))
+        .cornerRadius(12)
+        .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
+    }
+    
+    private var citiesCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Image(systemName: "building.2")
+                    .foregroundColor(.orange)
+                    .font(.title2)
+                Text("Cities")
+                    .font(.headline)
+                Spacer()
+                Text("\(cityTotals.filter { $0.1 > 0 }.count)")
+                    .font(.title3)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.orange)
+            }
+            
+            let displayedCities = showAllCities ? cityTotals : Array(cityTotals.prefix(min(3, cityTotals.count)))
+            
+            ForEach(Array(displayedCities.enumerated()), id: \.offset) { index, entry in
+                if entry.1 > 0 {
+                    Button(action: {
+                        onLocationSelected?("", entry.0)
+                        dismiss()
+                    }) {
+                        HStack {
+                            Image(systemName: "location.fill")
+                                .foregroundColor(.orange)
+                                .font(.caption)
+                            
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(entry.0)
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                                
+                                Text("\(Int(entry.1)) km")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            
+                            Spacer()
+                            
+                            Text("#\(index + 1)")
+                                .font(.caption)
+                                .fontWeight(.medium)
+                                .foregroundColor(.orange)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.orange.opacity(0.1))
+                                .cornerRadius(8)
+                        }
+                        .padding(.vertical, 4)
+                        .foregroundColor(.primary)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                }
+            }
+            
+                if cityTotals.count > 3 {
+                Button(action: { showAllCities.toggle() }) {
+                    HStack {
+                        Text(showAllCities ? "Show less" : "Show all \(cityTotals.count) cities")
+                        Image(systemName: showAllCities ? "chevron.up" : "chevron.down")
+                    }
+                    .font(.caption)
+                    .foregroundColor(.orange)
+                }
+            }
+        }
+        .padding()
+        .background(Color(.systemBackground))
+        .cornerRadius(12)
+        .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
+    }
+    
+    private func countryFlag(for country: String) -> String {
+        let flagMap: [String: String] = [
+            "United States": "🇺🇸",
+            "Canada": "🇨🇦",
+            "Mexico": "🇲🇽",
+            "United Kingdom": "🇬🇧",
+            "Germany": "🇩🇪",
+            "France": "🇫🇷",
+            "Italy": "🇮🇹",
+            "Spain": "🇪🇸",
+            "Netherlands": "🇳🇱",
+            "Belgium": "🇧🇪",
+            "Switzerland": "🇨🇭",
+            "Austria": "🇦🇹",
+            "Portugal": "🇵🇹",
+            "Denmark": "🇩🇰",
+            "Sweden": "🇸🇪",
+            "Norway": "🇳🇴",
+            "Finland": "🇫🇮",
+            "Poland": "🇵🇱",
+            "Czech Republic": "🇨🇿",
+            "Hungary": "🇭🇺",
+            "Greece": "🇬🇷",
+            "Turkey": "🇹🇷",
+            "Russia": "🇷🇺",
+            "Japan": "🇯🇵",
+            "China": "🇨🇳",
+            "South Korea": "🇰🇷",
+            "Australia": "🇦🇺",
+            "New Zealand": "🇳🇿",
+            "Brazil": "🇧🇷",
+            "Argentina": "🇦🇷",
+            "Chile": "🇨🇱",
+            "Colombia": "🇨🇴",
+            "Peru": "🇵🇪",
+            "India": "🇮🇳",
+            "Thailand": "🇹🇭",
+            "Singapore": "🇸🇬",
+            "Malaysia": "🇲🇾",
+            "Indonesia": "🇮🇩",
+            "Philippines": "🇵🇭",
+            "Vietnam": "🇻🇳",
+            "South Africa": "🇿🇦",
+            "Egypt": "🇪🇬",
+            "Morocco": "🇲🇦",
+            "Israel": "🇮🇱",
+            "UAE": "🇦🇪",
+            "Saudi Arabia": "🇸🇦"
+        ]
+        return flagMap[country] ?? "🌍"
     }
 
     private func computeStats() {
+        print("📊 Starting computeStats with \(routes.count) routes")
         // Validate routes array first
         guard !routes.isEmpty else {
             print("⚠️ Empty routes array")
@@ -107,6 +357,7 @@ struct StatsView: View {
             return
         }
         let routesArray = routes
+        print("📊 Processing \(routesArray.count) routes for stats")
         
         routeTotal = routesArray.count
         processedRoutes = 0
@@ -187,11 +438,11 @@ struct StatsView: View {
                     countryDict["(Unknown)"] = unknownKm
                 }
                 
-                self.countryTotals = countryDict.sorted { $0.value > $1.value }
-                self.cityTotals = result.cityDict.sorted { $0.value > $1.value }
+                // Safely sort dictionaries with validation
+                self.countryTotals = self.safeSortDictionary(countryDict)
+                self.cityTotals = self.safeSortDictionary(result.cityDict)
                 self.loading = false
                 
-                print("🚀 Local geocoding completed! Processed \(result.localGeocodedCount) locations locally, \(result.networkGeocodedCount) via network")
             }
         }
     }
@@ -239,6 +490,7 @@ struct StatsView: View {
         coordCache: [String: String],
         cityCache: [String: String]
     ) -> ProcessingResult {
+        print("🔄 Starting processAllRoutesWithLocalGeocoding with \(routes.count) routes")
         
         var mutableCoordCache = coordCache
         var mutableCityCache = cityCache
@@ -248,14 +500,26 @@ struct StatsView: View {
         var localGeocodedCount = 0
         let networkGeocodedCount = 0
 
-        for route in routes {
-            DispatchQueue.main.async {
-                self.processedRoutes += 1
+        for (index, route) in routes.enumerated() {
+            // Add safety check for route validity
+            if index == 0 {
+                print("🔄 Processing first route: \(route.id) with \(route.coordinates.count) coordinates")
             }
             
-            // Validate route before processing
-            guard !route.coordinates.isEmpty else {
-                print("⚠️ Skipping route with no coordinates: \(route.id)")
+            // Update progress every 50 routes for better performance
+            if index % 50 == 0 {
+                DispatchQueue.main.async {
+                    self.processedRoutes = index
+                }
+            }
+            
+            // Validate route before processing (skip invalid routes silently)
+            guard !route.coordinates.isEmpty,
+                  route.coordinates.allSatisfy({ coord in
+                      coord.latitude.isFinite && coord.longitude.isFinite &&
+                      coord.latitude >= -90 && coord.latitude <= 90 &&
+                      coord.longitude >= -180 && coord.longitude <= 180
+                  }) else {
                 continue
             }
 
@@ -283,17 +547,28 @@ struct StatsView: View {
             }
             
             DispatchQueue.main.async {
-                self.uniqueCoords = visited.count
-                self.geocoded = localGeocodedCount
+                // Safely access visited.count with type checking
+                if let visitedSet = visited as? Set<String> {
+                    self.uniqueCoords = visitedSet.count
+                } else {
+                    print("⚠️ Warning: visited is not a Set, type: \(type(of: visited))")
+                    self.uniqueCoords = 0
+                }
+                self.geocoded = Int(localGeocodedCount)
             }
             
             // Update UI with current progress (less frequently for performance)
-            if localGeocodedCount % 10 == 0 {
+            if index % 100 == 0 {
                 DispatchQueue.main.async {
-                    self.countryTotals = countryDict.sorted { $0.value > $1.value }
-                    self.cityTotals = cityDict.sorted { $0.value > $1.value }
+                    self.countryTotals = self.safeSortDictionary(countryDict)
+                    self.cityTotals = self.safeSortDictionary(cityDict)
                 }
             }
+        }
+        
+        // Final progress update
+        DispatchQueue.main.async {
+            self.processedRoutes = routes.count
         }
         
         return ProcessingResult(
@@ -301,7 +576,7 @@ struct StatsView: View {
             cityCache: mutableCityCache,
             countryDict: countryDict,
             cityDict: cityDict,
-            visitedCount: visited.count,
+            visitedCount: (visited as? Set<String>)?.count ?? 0,
             localGeocodedCount: localGeocodedCount,
             networkGeocodedCount: networkGeocodedCount
         )
@@ -357,6 +632,13 @@ struct StatsView: View {
                 
                 // Normalize country names to avoid duplicates
                 country = normalizeCountryName(country)
+                
+                // Validate results
+                if country.isEmpty || city.isEmpty {
+                    print("⚠️ Empty geocoding result for coordinate: \(coordinate)")
+                    country = country.isEmpty ? "Unknown" : country
+                    city = city.isEmpty ? "Unknown" : city
+                }
             }
             
             segments.append(RouteSegment(
@@ -383,8 +665,15 @@ struct StatsView: View {
         
         // Always include the last point
         if let last = coordinates.last {
-            if sampledPoints.isEmpty || (sampledPoints.last!.latitude != last.latitude || sampledPoints.last!.longitude != last.longitude) {
+            if sampledPoints.isEmpty {
                 sampledPoints.append(last)
+            } else if let lastPoint = sampledPoints.last {
+                // Use safe comparison for coordinates
+                let latDiff = abs(lastPoint.latitude - last.latitude)
+                let lonDiff = abs(lastPoint.longitude - last.longitude)
+                if latDiff > 0.0001 || lonDiff > 0.0001 { // Different enough to include
+                    sampledPoints.append(last)
+                }
             }
         }
         
@@ -405,6 +694,17 @@ struct StatsView: View {
         default:
             return country
         }
+    }
+    
+    private func safeSortDictionary(_ dict: [String: Double]) -> [(String, Double)] {
+        return dict.compactMap { (key, value) -> (String, Double)? in
+            // Validate that value is valid
+            guard value.isFinite && value >= 0 else {
+                print("⚠️ Invalid value in dictionary for key '\(key)': \(value)")
+                return nil
+            }
+            return (key, value)
+        }.sorted { $0.1 > $1.1 }
     }
     
     // Keep the old function for fallback if needed
@@ -449,7 +749,13 @@ struct StatsView: View {
             if !visited.contains(key) {
                 visited.insert(key)
                 DispatchQueue.main.async {
-                    self.uniqueCoords = visited.count
+                    // Safely access visited.count with type checking
+                    if let visitedSet = visited as? Set<String> {
+                        self.uniqueCoords = visitedSet.count
+                    } else {
+                        print("⚠️ Warning: visited is not a Set in concurrent access, type: \(type(of: visited))")
+                        self.uniqueCoords = 0
+                    }
                 }
             }
 
@@ -508,7 +814,7 @@ struct StatsView: View {
             cityCache: mutableCityCache,
             countryDict: countryDict,
             cityDict: cityDict,
-            visitedCount: visited.count,
+            visitedCount: (visited as? Set<String>)?.count ?? 0,
             localGeocodedCount: 0,
             networkGeocodedCount: geocodedCount
         )
@@ -527,7 +833,7 @@ extension Array {
 
 struct StatsView_Previews: PreviewProvider {
     static var previews: some View {
-        StatsView(routes: [])
+        StatsView(routes: [], onLocationSelected: nil)
     }
 }
 

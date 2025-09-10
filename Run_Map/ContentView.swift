@@ -189,10 +189,25 @@ class RunViewModel: ObservableObject {
         // First, load cached routes immediately for instant UI
         let cachedRoutes = routeStorage.loadRoutes()
         if !cachedRoutes.isEmpty {
+            // Clean up any routes with insufficient coordinates
+            let validRoutes = cachedRoutes.filter { route in
+                if route.coordinates.count <= 1 {
+                    print("🧹 Removing cached route with insufficient coordinates: \(route.id) (count: \(route.coordinates.count))")
+                    return false
+                }
+                return true
+            }
+            
             DispatchQueue.main.async {
-                self.routes = cachedRoutes
-                self.hasContent = true
+                self.routes = validRoutes
+                self.hasContent = !validRoutes.isEmpty
                 self.loadProgress = 1.0
+            }
+            
+            // Save cleaned routes back to cache if we removed any
+            if validRoutes.count != cachedRoutes.count {
+                print("💾 Saving cleaned routes to cache: \(validRoutes.count) routes (removed \(cachedRoutes.count - validRoutes.count))")
+                routeStorage.saveRoutes(validRoutes)
             }
         }
         
@@ -232,16 +247,16 @@ class RunViewModel: ObservableObject {
                     
                     let segments = self.filterRoute(coordinates)
                     
-                    for segment in segments {
+                        for segment in segments {
                         // Only create routes with meaningful coordinate data
                         guard segment.count > 1 else { continue }
                         
                         let route = Route(coordinates: segment,
-                                        date: workout.startDate,
-                                        workoutType: workout.workoutActivityType,
+                                                     date: workout.startDate,
+                                                     workoutType: workout.workoutActivityType,
                                         durationSec: workout.duration)
                         newRoutes.append(route)
-                    }
+                        }
                     
                     DispatchQueue.main.async {
                         self.loadedCount += 1
@@ -263,22 +278,33 @@ class RunViewModel: ObservableObject {
     }
     
     func loadNewRuns() {
-        // Use either the latest cached route date or last sync date
-        let lastSyncDate = routeStorage.getLastSyncDate()
-        let latestRouteDate = routes.map(\.date).max()
-        
-        let sinceDate = [lastSyncDate, latestRouteDate].compactMap { $0 }.max() ?? Date.distantPast
+        // Get all existing route IDs to avoid duplicates
+        _ = Set(routes.map { route in
+            // Create a unique identifier for each route based on date and coordinates
+            "\(route.date.timeIntervalSince1970)_\(route.coordinates.count)"
+        })
         
         healthManager.fetchRunningWorkouts { workouts in
-            let newWorkouts = workouts.filter { $0.startDate > sinceDate }
+            print("🔍 Checking \(workouts.count) total workouts against \(self.routes.count) existing routes")
+            
+            // Filter out workouts we already have, with some tolerance for date precision
+            let newWorkouts = workouts.filter { workout in
+                // Check if we already have this workout (allowing for small time differences)
+                let hasExisting = self.routes.contains { route in
+                    abs(route.date.timeIntervalSince1970 - workout.startDate.timeIntervalSince1970) < 1.0
+                }
+                return !hasExisting
+            }
+            
+            print("🆕 Found \(newWorkouts.count) potentially new workouts to check")
             
             guard !newWorkouts.isEmpty else {
                 DispatchQueue.main.async {
                     self.loadProgress = 1.0
                 }
-                return
-            }
-            
+            return
+        }
+        
             DispatchQueue.main.async {
                 self.totalToLoad = newWorkouts.count
                 self.loadedCount = 0
@@ -300,18 +326,20 @@ class RunViewModel: ObservableObject {
                         return
                     }
                     
+                    print("✅ Processing workout with GPS data: \(workout.startDate)")
+                    
                     let segments = self.filterRoute(coordinates)
                     
-                    for segment in segments {
+                        for segment in segments {
                         // Only create routes with meaningful coordinate data
                         guard segment.count > 1 else { continue }
                         
                         let route = Route(coordinates: segment,
-                                        date: workout.startDate,
-                                        workoutType: workout.workoutActivityType,
+                                                     date: workout.startDate,
+                                                     workoutType: workout.workoutActivityType,
                                         durationSec: workout.duration)
                         newRoutes.append(route)
-                    }
+                        }
                     
                     DispatchQueue.main.async {
                         self.loadedCount += 1
@@ -324,13 +352,23 @@ class RunViewModel: ObservableObject {
             }
             
             group.notify(queue: .main) {
+                let skippedCount = newWorkouts.count - newRoutes.count
+                print("📊 Processed \(newWorkouts.count) new workouts: \(newRoutes.count) with GPS data, \(skippedCount) skipped")
                 if !newRoutes.isEmpty {
+                    print("📍 Adding \(newRoutes.count) new routes to existing \(self.routes.count)")
                     self.routes.append(contentsOf: newRoutes)
                     self.routes.sort { $0.date > $1.date }
-                    self.hasContent = !self.routes.isEmpty
+                        self.hasContent = !self.routes.isEmpty
                     
                     // Save updated routes to cache
                     self.routeStorage.saveRoutes(self.routes)
+                    print("💾 Total routes after sync: \(self.routes.count)")
+                } else {
+                    if skippedCount > 0 {
+                        print("ℹ️ No new routes added - all \(skippedCount) workouts lacked GPS data")
+                    } else {
+                        print("ℹ️ No new routes to add")
+                    }
                 }
                 self.routeStorage.setLastSyncDate(Date())
                 self.loadProgress = 1.0
@@ -430,14 +468,17 @@ struct ContentView: View {
     }
 
     @State private var region = MKCoordinateRegion(
-        center: CLLocationCoordinate2D(latitude: 52.52, longitude: 13.405),
-        span: MKCoordinateSpan(latitudeDelta: 0.1, longitudeDelta: 0.1)
+        center: CLLocationCoordinate2D(latitude: 20, longitude: 0), // World view center
+        span: MKCoordinateSpan(latitudeDelta: 120, longitudeDelta: 180) // World view span
     )
+    @State private var hasSetInitialLocation = false
     @State private var isLoading = true
     @State private var highlightedRouteIDs: Set<UUID> = []
     @State private var showLatestDayLabel = false
     @State private var showUserLocation = true
     @State private var showNoWorkouts = false
+    @State private var showNewCountryAlert = false
+    @State private var newCountriesFound: [String] = []
 
     // Tracking state variables
     @State private var isTracking = false
@@ -445,8 +486,6 @@ struct ContentView: View {
     @State private var trackingTimer: Timer?
     @State private var showControls = false
     @State private var showStats = false
-    // Speed color toggle state
-    @State private var colorBySpeed = false
 
     // Stats banner state
     @AppStorage("lastRunCount") private var lastRunCount = 0
@@ -469,11 +508,40 @@ struct ContentView: View {
         ZStack {
             RouteMapView(routes: viewModel.displayedRoutes,
                          region: region,
-                         highlightedRouteIDs: highlightedRouteIDs,
+                       highlightedRouteIDs: highlightedRouteIDs,
                          showUserLocation: showUserLocation,
                          liveCoordinates: liveCoordinates,
-                         mapType: mapType,
-                         colorBySpeed: colorBySpeed)
+                       mapType: mapType)
+                .onReceive(locationManager.$currentLocation) { location in
+                    // Center map on user's current location when first obtained
+                    if let location = location, !hasSetInitialLocation {
+                        withAnimation(.easeInOut(duration: 1.5)) {
+                            region = MKCoordinateRegion(
+                                center: location.coordinate,
+                                span: MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05) // Closer zoom for current location
+                            )
+                            hasSetInitialLocation = true
+                        }
+                    }
+                }
+                .onReceive(viewModel.$routes) { routes in
+                    // If no current location available, center on latest workout
+                    if !hasSetInitialLocation && !routes.isEmpty {
+                        if let latestRoute = routes.first, 
+                           let firstCoord = latestRoute.coordinates.first,
+                           firstCoord.latitude.isFinite && firstCoord.longitude.isFinite &&
+                           abs(firstCoord.latitude) <= 90 && abs(firstCoord.longitude) <= 180 {
+                            withAnimation(.easeInOut(duration: 1.5)) {
+                                region = MKCoordinateRegion(
+                                    center: firstCoord,
+                                    span: MKCoordinateSpan(latitudeDelta: 0.1, longitudeDelta: 0.1) // Medium zoom for workout location
+                                )
+                                hasSetInitialLocation = true
+                            }
+                        }
+                        // If no valid coordinates found, stay at world view (hasSetInitialLocation remains false)
+                    }
+                }
                 .ignoresSafeArea()
             
             VStack {
@@ -495,15 +563,6 @@ struct ContentView: View {
                 }
                 Spacer()
 
-                HStack {
-                    Text("\(viewModel.displayedRoutes.count) workouts • " +
-                         String(format: "%.1f km", viewModel.totalDistanceKm))
-                        .font(.footnote).bold()
-                        .padding(8)
-                        .background(Color.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 8))
-                    Spacer()
-                }
-                .padding(.horizontal)
                 .padding(.bottom, 8)
             }
             
@@ -560,13 +619,25 @@ struct ContentView: View {
                         // Re‑center to current location
                         circleButton(icon: "location.fill")
                             .onTapGesture {
+                                // Short press: always go to current location
+                                print("🎯 Location button tapped")
                                 if let loc = locationManager.currentLocation {
-                                    region = MKCoordinateRegion(
+                                    print("📍 Current location found: \(loc.coordinate)")
+                                    let newRegion = MKCoordinateRegion(
                                         center: loc.coordinate,
                                         span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01))
+                                    print("🎯 Setting region to: \(newRegion)")
+                                    withAnimation(.easeInOut(duration: 1.0)) {
+                                        region = newRegion
+                                    }
+                                } else {
+                                    print("⚠️ No current location available - check location permissions in Settings")
                                 }
                             }
-                            .onLongPressGesture { showUserLocation = false }
+                            .onLongPressGesture {
+                                // Long press: toggle user location dot
+                                showUserLocation.toggle()
+                            }
 
                         // Map style toggle button
                         circleButton(icon: mapType == .standard ? "globe" : "map")
@@ -576,11 +647,6 @@ struct ContentView: View {
                                 )
                             }
 
-                        // Speed color toggle button
-                        circleButton(icon: "speedometer")
-                            .onTapGesture {
-                                colorBySpeed.toggle()
-                            }
 
                         // Stats button
                         circleButton(icon: "chart.bar")
@@ -624,6 +690,8 @@ struct ContentView: View {
                 showNoWorkouts = viewModel.routes.isEmpty
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     isLoading = false
+                    // Check for new countries after loading is complete
+                    checkForNewCountries(routes: viewModel.routes)
                 }
                 if !hasShownSummary {
                     let newRuns = viewModel.routes.count - lastRunCount
@@ -631,10 +699,37 @@ struct ContentView: View {
                     if hasLaunchedBefore {
                         if newRuns == 0 && newDistance == 0 {
                             summaryMessage = "Go explore!"
+                            // Auto-close after 1 second
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                                showSummaryAlert = false
+                            }
                         } else {
-                            summaryMessage = "You added \(newRuns) runs for " +
-                                String(format: "%.1f", newDistance) +
-                                " km since your last visit. Great job!"
+                            // Get countries from new runs (ensure newRuns is not negative)
+                            let safeNewRuns = max(0, newRuns)
+                            let newRoutes = Array(viewModel.routes.prefix(safeNewRuns))
+                            var newCountries = Set<String>()
+                            
+                            for route in newRoutes {
+                                guard let firstCoord = route.coordinates.first else { continue }
+                                let geocodeResult = LocalGeocoder.geocode(latitude: firstCoord.latitude, longitude: firstCoord.longitude)
+                                if !geocodeResult.country.isEmpty && geocodeResult.country != "Unknown" {
+                                    newCountries.insert(geocodeResult.country)
+                                }
+                            }
+                            
+                            var message = "You added \(newRuns) runs for " + String(format: "%.1f", newDistance) + " km"
+                            
+                            if !newCountries.isEmpty {
+                                let sortedCountries = Array(newCountries).sorted()
+                                if sortedCountries.count == 1 {
+                                    message += " in \(sortedCountries[0])"
+                                } else {
+                                    message += " in \(sortedCountries.joined(separator: ", "))"
+                                }
+                            }
+                            
+                            message += " since your last visit. Great job!"
+                            summaryMessage = message
                         }
                         showSummaryAlert = true
                     }
@@ -662,10 +757,21 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showStats) {
-            StatsView(routes: viewModel.displayedRoutes)
+            StatsView(routes: viewModel.displayedRoutes) { country, city in
+                navigateToLocation(country: country, city: city)
+            }
         }
         .alert(summaryMessage ?? "", isPresented: $showSummaryAlert) {
             Button("OK", role: .cancel) { }
+        }
+        .alert("🎉 New Country Visited!", isPresented: $showNewCountryAlert) {
+            Button("Awesome!", role: .cancel) { }
+        } message: {
+            if newCountriesFound.count == 1 {
+                Text("Congratulations! You've explored a new country: \(newCountriesFound.first!)! 🌍")
+            } else {
+                Text("Congratulations! You've explored \(newCountriesFound.count) new countries: \(newCountriesFound.joined(separator: ", "))! 🌍")
+            }
         }
     }   // ← closes the `var body: some View` property
 
@@ -716,6 +822,183 @@ struct ContentView: View {
         }
     }
 
+    private func checkForNewCountries(routes: [Route]) {
+        let oneWeekAgo = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
+        
+        // Get routes from the last week
+        let recentRoutes = routes.filter { $0.date >= oneWeekAgo }
+        guard !recentRoutes.isEmpty else { return }
+        
+        // Get ALL historical countries from all routes (not just stored ones)
+        var allHistoricalCountries = Set<String>()
+        
+        for route in routes {
+            guard let firstCoord = route.coordinates.first else { continue }
+            let geocodeResult = LocalGeocoder.geocode(latitude: firstCoord.latitude, longitude: firstCoord.longitude)
+            if !geocodeResult.country.isEmpty && geocodeResult.country != "Unknown" {
+                allHistoricalCountries.insert(geocodeResult.country)
+            }
+        }
+        
+        // Get countries from recent routes only
+        var recentCountries = Set<String>()
+        
+        for route in recentRoutes {
+            guard let firstCoord = route.coordinates.first else { continue }
+            let geocodeResult = LocalGeocoder.geocode(latitude: firstCoord.latitude, longitude: firstCoord.longitude)
+            if !geocodeResult.country.isEmpty && geocodeResult.country != "Unknown" {
+                recentCountries.insert(geocodeResult.country)
+            }
+        }
+        
+        // Get previously stored countries (from last app run)
+        let previouslyKnownCountries = Set(UserDefaults.standard.stringArray(forKey: "visitedCountries") ?? [])
+        
+        // Find truly new countries: countries from recent workouts that weren't known in the previous app session
+        let newCountries = recentCountries.subtracting(previouslyKnownCountries)
+        
+        if !newCountries.isEmpty {
+            newCountriesFound = Array(newCountries).sorted()
+            showNewCountryAlert = true
+        }
+        
+        // Update stored countries with all historical countries
+        UserDefaults.standard.set(Array(allHistoricalCountries), forKey: "visitedCountries")
+    }
+    
+    private func navigateToLocation(country: String, city: String) {
+        print("🗺️ Navigating to: country='\(country)', city='\(city)'")
+        
+        // Find routes that match the selected location
+        var matchingRoutes: [Route] = []
+        
+        // Safely iterate through routes
+        for route in viewModel.routes {
+            guard !route.coordinates.isEmpty else { continue }
+            
+            // Sample multiple points from the route for better accuracy
+            let sampleCount = min(5, route.coordinates.count)
+            let step = max(1, route.coordinates.count / sampleCount)
+            
+            var routeMatches = false
+            for i in stride(from: 0, to: route.coordinates.count, by: step) {
+                let coord = route.coordinates[i]
+                guard coord.latitude.isFinite && coord.longitude.isFinite else { continue }
+                
+                let geocodeResult = LocalGeocoder.geocode(latitude: coord.latitude, longitude: coord.longitude)
+                
+                // Debug: print geocoding result for first sample point
+                if i == 0 {
+                    print("📍 Route \(route.id): geocoded as '\(geocodeResult.country)' / '\(geocodeResult.city)'")
+                }
+                
+                // If we're looking for a specific city, match both country and city
+                if !city.isEmpty && city != "Unknown" {
+                    if geocodeResult.country == country && geocodeResult.city == city {
+                        print("✅ City match found: \(geocodeResult.country) / \(geocodeResult.city)")
+                        routeMatches = true
+                        break
+                    }
+                } else if !country.isEmpty {
+                    // If only country is specified, match just the country
+                    if geocodeResult.country == country {
+                        print("✅ Country match found: \(geocodeResult.country)")
+                        routeMatches = true
+                        break
+                    }
+                }
+            }
+            
+            if routeMatches {
+                matchingRoutes.append(route)
+            }
+        }
+        
+        // Navigate to the matching routes
+        print("🔍 Found \(matchingRoutes.count) matching routes")
+        if !matchingRoutes.isEmpty {
+            // Create a region that encompasses the entire country/city, not just the routes
+            let targetRegion = createRegionForLocation(country: country, city: city, routes: matchingRoutes)
+            print("🎯 Target region: center=\(targetRegion.center), span=\(targetRegion.span)")
+            
+            withAnimation(.easeInOut(duration: 1.0)) {
+                region = targetRegion
+            }
+            
+            // Highlight the matching routes
+            highlightedRouteIDs = Set(matchingRoutes.map { $0.id })
+            print("✨ Highlighted \(highlightedRouteIDs.count) routes")
+            
+            // Show label briefly
+            showLatestDayLabel = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                showLatestDayLabel = false
+            }
+        } else {
+            print("⚠️ No matching routes found for country='\(country)', city='\(city)'")
+        }
+        
+        // Dismiss the stats sheet
+        showStats = false
+    }
+    
+    private func createRegionForLocation(country: String, city: String, routes: [Route]) -> MKCoordinateRegion {
+        // Get all coordinates from the routes to determine the center
+        let allCoords = routes.flatMap { $0.coordinates }
+        guard !allCoords.isEmpty else {
+            // Fallback to world view if no coordinates
+            return MKCoordinateRegion(
+                center: CLLocationCoordinate2D(latitude: 20, longitude: 0),
+                span: MKCoordinateSpan(latitudeDelta: 120, longitudeDelta: 180)
+            )
+        }
+        
+        // Calculate the center from route coordinates
+        let centerLat = allCoords.map { $0.latitude }.reduce(0, +) / Double(allCoords.count)
+        let centerLon = allCoords.map { $0.longitude }.reduce(0, +) / Double(allCoords.count)
+        let center = CLLocationCoordinate2D(latitude: centerLat, longitude: centerLon)
+        
+        // Determine appropriate span based on location type
+        let span: MKCoordinateSpan
+        
+        if !city.isEmpty && city != "Unknown" {
+            // City view - smaller span
+            span = MKCoordinateSpan(latitudeDelta: 0.5, longitudeDelta: 0.5)
+        } else {
+            // Country view - larger span based on country
+            span = getCountrySpan(for: country, center: center)
+        }
+        
+        return MKCoordinateRegion(center: center, span: span)
+    }
+    
+    private func getCountrySpan(for country: String, center: CLLocationCoordinate2D) -> MKCoordinateSpan {
+        // Define spans for different countries/regions
+        switch country {
+        case "United States":
+            return MKCoordinateSpan(latitudeDelta: 25, longitudeDelta: 40)
+        case "Canada":
+            return MKCoordinateSpan(latitudeDelta: 35, longitudeDelta: 60)
+        case "Russia":
+            return MKCoordinateSpan(latitudeDelta: 40, longitudeDelta: 100)
+        case "China":
+            return MKCoordinateSpan(latitudeDelta: 30, longitudeDelta: 40)
+        case "Brazil":
+            return MKCoordinateSpan(latitudeDelta: 25, longitudeDelta: 30)
+        case "Australia":
+            return MKCoordinateSpan(latitudeDelta: 25, longitudeDelta: 35)
+        case "India":
+            return MKCoordinateSpan(latitudeDelta: 20, longitudeDelta: 25)
+        case "Germany", "France", "United Kingdom", "Italy", "Spain":
+            return MKCoordinateSpan(latitudeDelta: 8, longitudeDelta: 10)
+        case "Japan":
+            return MKCoordinateSpan(latitudeDelta: 12, longitudeDelta: 15)
+        default:
+            // Default span for smaller countries or unknown countries
+            return MKCoordinateSpan(latitudeDelta: 5, longitudeDelta: 5)
+        }
+    }
+
 
 }
 
@@ -728,7 +1011,6 @@ struct RouteMapView: UIViewRepresentable {
     var showUserLocation: Bool
     var liveCoordinates: [CLLocationCoordinate2D]
     var mapType: MKMapType
-    var colorBySpeed: Bool
     
     func makeUIView(context: Context) -> MKMapView {
         let mapView = MKMapView()
@@ -826,15 +1108,6 @@ struct RouteMapView: UIViewRepresentable {
             let renderer = MKPolylineRenderer(polyline: polyline)
             if polyline.isHighlighted {
                 renderer.strokeColor = .orange
-            } else if parent.colorBySpeed, let v = polyline.averageSpeed {
-                renderer.strokeColor = {
-                    switch v {
-                    case ..<6:  .systemBlue
-                    case ..<9:  .systemGreen
-                    case ..<12: .systemOrange
-                    default:    .systemRed
-                    }
-                }()
             } else {
                 switch polyline.workoutType {
                 case .running:
